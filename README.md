@@ -1,5 +1,7 @@
 # Shadow AI Hunter - Enterprise AI Detection Platform
 
+> **⚠️ Current Status (v2.0.0)**: This is a **prototype/demo**. Many features below are planned for V1/V2. See [Roadmap](#-roadmap) for delivery timeline.
+
 <div align="center">
   <img src="https://img.shields.io/badge/Version-2.0.0-blue.svg" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
@@ -314,6 +316,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Security Issues**: security@shadowai.com
 
 ## 🎯 Roadmap
+
+### ✅ Currently Implemented (Prototype)
+- Basic Flask backend with mock AI detection
+- React dashboard (static UI)
+- Docker Compose setup (MongoDB + Backend + Frontend + Nginx)
+- Basic network scanning (socket-based, limited)
 
 ### Version 2.1 (Q1 2025)
 - [ ] Cloud AI service detection (AWS Bedrock, Azure OpenAI)

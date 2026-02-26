@@ -26,16 +26,16 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - MONGO_URL=mongodb://admin:shadowai123@mongodb:27017/shadow_ai_hunter?authSource=admin
-      - SECRET_KEY=your-super-secret-key-change-in-production
+      - MONGO_URL=${MONGO_URL:-mongodb://admin:changeme@mongodb:27017/shadow_ai_hunter?authSource=admin}
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
     depends_on:
       - mongodb
     volumes:
       - ./backend:/app
-      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - shadow_ai_network
-    privileged: true  # Required for network scanning
+    # SECURITY: Do NOT run privileged in production
+    # privileged: true  # REMOVED - security risk
 
   frontend:
     build:

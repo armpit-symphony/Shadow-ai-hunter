@@ -14,20 +14,21 @@
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Telemetry Ingestion | ⚠️ Partial | Workers exist, need API endpoint to import logs |
-| Detection Engine | ⚠️ Partial | Signatures exist, need integration with event pipeline |
-| Reporting | ⚠️ Partial | JSON works, PDF needs real implementation |
-| CI/CD Security | ❌ Pending | GitHub Actions, Trivy, Dependabot |
-| LLM Agent Layer | ❌ Pending | Phase 2 - requires security baseline first |
+| Telemetry Ingestion | ✅ Done | `/api/telemetry/import` endpoint added |
+| Detection Engine | ✅ Done | Integrated with queue |
+| Reporting | ⚠️ Partial | JSON works, PDF placeholder |
+| CI/CD Security | ✅ Done | GitHub Actions + Trivy + Dependabot |
+| Scan API → Queue | ✅ Done | Connected to RQ |
+| LLM Agent Layer | ❌ Pending | Phase 2 |
 
 ## 🔧 What's Missing / Needs Work
 
 ### Critical (V1)
-- [ ] **Scan API → Queue integration**: Connect `/api/scan` endpoint to RQ queue
-- [ ] **Telemetry import endpoint**: `/api/telemetry/import` to accept log uploads
-- [ ] **Worker processes**: Need to run as separate containers/services
-- [ ] **WebSocket updates**: Push scan progress to UI
-- [ ] **Mongo models**: Create proper collections for events, evidence, scans
+- [x] **Scan API → Queue integration**: Connected `/api/scan` to RQ
+- [x] **Telemetry import endpoint**: `/api/telemetry/import` now available
+- [ ] **Worker processes**: Need to run as separate containers
+- [ ] **WebSocket updates**: Push scan progress to UI (partially done)
+- [ ] **Mongo models**: Events collection added
 
 ### Important (V1)
 - [ ] **Real PDF generation**: Currently placeholder

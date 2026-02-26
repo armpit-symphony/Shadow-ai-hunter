@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
 # Import auth
 from auth import (
@@ -221,22 +222,37 @@ async def initiate_network_scan(scan_request: NetworkScanRequest, current_user: 
     """Start a network scan"""
     try:
         # Create scan record
+        scan_id = str(uuid4())
         scan_data = {
+            "_id": scan_id,
             "network_range": scan_request.network_range,
             "scan_type": scan_request.scan_type,
             "deep_scan": scan_request.deep_scan,
-            "status": "running",
+            "status": "queued",
             "timestamp": datetime.utcnow(),
             "devices_found": 0,
-            "ai_services_detected": 0
+            "ai_services_detected": 0,
+            "initiated_by": current_user.username
         }
-        result = scans_collection.insert_one(scan_data)
-        scan_id = str(result.inserted_id)
+        scans_collection.insert_one(scan_data)
         
-        # Start background scan (simplified for now)
-        asyncio.create_task(perform_network_scan(scan_id, scan_request))
+        # Enqueue job to RQ (optional - falls back to async if Redis unavailable)
+        try:
+            from workers.queue import scan_queue
+            from workers.scanner_worker import network_discovery_scan
+            job = scan_queue.enqueue(
+                network_discovery_scan,
+                scan_request.network_range,
+                scan_id,
+                job_id=scan_id
+            )
+            logger.info(f"[{scan_id}] Scan enqueued to job queue")
+        except Exception as e:
+            logger.warning(f"RQ not available, using async: {e}")
+            # Fallback to async task
+            asyncio.create_task(perform_network_scan(scan_id, scan_request))
         
-        return {"message": "Scan initiated", "scan_id": scan_id}
+        return {"message": "Scan initiated", "scan_id": scan_id, "status": "queued"}
     except Exception as e:
         logger.error(f"Error initiating scan: {e}")
         raise HTTPException(status_code=500, detail="Failed to initiate network scan")
@@ -431,6 +447,93 @@ async def populate_demo_data(current_user: User = Depends(require_admin)):
     except Exception as e:
         logger.error(f"Error populating demo data: {e}")
         raise HTTPException(status_code=500, detail="Failed to populate demo data")
+
+
+# Telemetry Import Endpoint
+class TelemetryImportRequest(BaseModel):
+    log_type: str  # "dns" or "proxy"
+    entries: List[Dict]
+
+
+@app.post("/api/telemetry/import")
+async def import_telemetry(
+    import_request: TelemetryImportRequest,
+    current_user: User = Depends(require_admin)
+):
+    """
+    Import telemetry logs for analysis
+    Accepts DNS or Proxy logs, normalizes and stores events
+    """
+    try:
+        scan_id = str(uuid4())
+        
+        # Create scan/import record
+        import_data = {
+            "_id": scan_id,
+            "log_type": import_request.log_type,
+            "status": "processing",
+            "timestamp": datetime.utcnow(),
+            "entries_count": len(import_request.entries),
+            "imported_by": current_user.username
+        }
+        
+        # Store raw entries
+        events_collection = db.events
+        events_collection.insert_many(import_request.entries)
+        
+        import_data["status"] = "completed"
+        import_data["completed_at"] = datetime.utcnow()
+        
+        # Enqueue detection job
+        try:
+            from workers.queue import detection_queue
+            from workers.detector_worker import run_detection
+            job = detection_queue.enqueue(
+                run_detection,
+                scan_id,
+                import_request.entries,
+                job_id=f"detect-{scan_id}"
+            )
+            import_data["detection_job_id"] = job.id
+        except Exception as e:
+            logger.warning(f"RQ not available for detection: {e}")
+        
+        return {
+            "message": "Telemetry imported successfully",
+            "import_id": scan_id,
+            "entries_processed": len(import_request.entries),
+            "status": "completed"
+        }
+    except Exception as e:
+        logger.error(f"Error importing telemetry: {e}")
+        raise HTTPException(status_code=500, detail="Failed to import telemetry")
+
+
+@app.get("/api/scans")
+async def get_scans(limit: int = 50, current_user: User = Depends(require_viewer)):
+    """Get scan history"""
+    try:
+        scans = list(scans_collection.find({}, {"_id": 0}).sort("timestamp", -1).limit(limit))
+        return {"scans": scans}
+    except Exception as e:
+        logger.error(f"Error getting scans: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get scans")
+
+
+@app.get("/api/scans/{scan_id}")
+async def get_scan(scan_id: str, current_user: User = Depends(require_viewer)):
+    """Get specific scan details"""
+    try:
+        scan = scans_collection.find_one({"_id": scan_id}, {"_id": 0})
+        if not scan:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        return {"scan": scan}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting scan: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get scan")
+
 
 if __name__ == "__main__":
     import uvicorn

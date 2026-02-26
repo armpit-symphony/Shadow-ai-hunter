@@ -1,0 +1,41 @@
+name: Security - Dependency & Container Scan
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run pip-audit
+        uses: pypa/pip-audit@v1.0.0
+        with:
+          requirements: backend/requirements.txt
+          
+      - name: Build Docker image
+        run: |
+          docker compose build backend
+          
+      - name: Run Trivy container scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          image-name: shadow-ai-hunter-backend:latest
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          
+      - name: Run Trivy config scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: .
+          format: 'table'
+          exit-code: '1'
+          scanners: misconfig,secret

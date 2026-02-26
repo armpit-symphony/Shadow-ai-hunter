@@ -11,6 +11,13 @@ import json
 import logging
 from contextlib import asynccontextmanager
 
+# Import auth
+from auth import (
+    User, UserRole, require_admin, require_analyst, require_viewer,
+    get_current_active_user
+)
+from auth_routes import router as auth_router
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -65,6 +72,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include auth routes
+app.include_router(auth_router)
 
 # Pydantic models
 class NetworkScanRequest(BaseModel):
@@ -138,7 +148,7 @@ async def health_check():
 
 # Dashboard endpoints
 @app.get("/api/dashboard/stats", response_model=DashboardStats)
-async def get_dashboard_stats():
+async def get_dashboard_stats(current_user: User = Depends(require_viewer)):
     """Get overall dashboard statistics"""
     try:
         total_devices = devices_collection.count_documents({})
@@ -164,7 +174,7 @@ async def get_dashboard_stats():
         raise HTTPException(status_code=500, detail="Failed to get dashboard statistics")
 
 @app.get("/api/devices")
-async def get_devices():
+async def get_devices(current_user: User = Depends(require_viewer)):
     """Get all detected devices"""
     try:
         devices = list(devices_collection.find({}, {"_id": 0}).sort("ai_risk_score", -1))
@@ -174,7 +184,7 @@ async def get_devices():
         raise HTTPException(status_code=500, detail="Failed to get devices")
 
 @app.get("/api/alerts")
-async def get_alerts(limit: int = 50):
+async def get_alerts(limit: int = 50, current_user: User = Depends(require_viewer)):
     """Get recent alerts"""
     try:
         alerts = list(alerts_collection.find({}, {"_id": 0}).sort("created_at", -1).limit(limit))
@@ -184,7 +194,7 @@ async def get_alerts(limit: int = 50):
         raise HTTPException(status_code=500, detail="Failed to get alerts")
 
 @app.get("/api/policies")
-async def get_policies():
+async def get_policies(current_user: User = Depends(require_viewer)):
     """Get all policy rules"""
     try:
         policies = list(policies_collection.find({}, {"_id": 0}).sort("created_at", -1))
@@ -194,7 +204,7 @@ async def get_policies():
         raise HTTPException(status_code=500, detail="Failed to get policies")
 
 @app.post("/api/policies")
-async def create_policy(policy: PolicyRule):
+async def create_policy(policy: PolicyRule, current_user: User = Depends(require_analyst)):
     """Create a new policy rule"""
     try:
         policy.created_at = datetime.utcnow()
@@ -207,7 +217,7 @@ async def create_policy(policy: PolicyRule):
         raise HTTPException(status_code=500, detail="Failed to create policy")
 
 @app.post("/api/scan")
-async def initiate_network_scan(scan_request: NetworkScanRequest):
+async def initiate_network_scan(scan_request: NetworkScanRequest, current_user: User = Depends(require_analyst)):
     """Start a network scan"""
     try:
         # Create scan record
@@ -331,8 +341,8 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 @app.get("/api/demo/populate")
-async def populate_demo_data():
-    """Populate database with demo data"""
+async def populate_demo_data(current_user: User = Depends(require_admin)):
+    """Populate database with demo data (admin only)"""
     try:
         # Clear existing data
         devices_collection.delete_many({})

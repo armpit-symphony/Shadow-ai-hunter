@@ -214,6 +214,7 @@ function ProtectedLayout() {
   const adminNav = [
     { id: 'lists',     label: 'Allow/Deny Lists', icon: FileText },
     { id: 'users',     label: 'User Management',  icon: User },
+    { id: 'adminops',  label: 'Admin Ops',        icon: Shield },
   ];
   const analystNav = [
     { id: 'baselines', label: 'Baselines',        icon: Terminal },
@@ -234,6 +235,7 @@ function ProtectedLayout() {
       case 'baselines': return <BaselinesPage />;
       case 'lists':     return <ListsPage />;
       case 'users':     return <UsersPage />;
+      case 'adminops':  return <AdminOpsPage />;
       default:          return <Dashboard />;
     }
   };
@@ -1727,6 +1729,101 @@ function BaselinesPage() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin Ops Page (admin)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function AdminOpsPage() {
+  const { api } = useAuth();
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [siemDeliveries, setSiemDeliveries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState('');
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
+
+  const loadAll = useCallback(() => {
+    setLoading(true);
+    Promise.all([
+      api.get('/api/admin/audit-logs?limit=50'),
+      api.get('/api/admin/siem-deliveries?limit=50'),
+    ])
+      .then(([a, s]) => {
+        setAuditLogs(a.data.logs || []);
+        setSiemDeliveries(s.data.deliveries || []);
+      })
+      .catch(() => showToast('Failed to load admin ops data.'))
+      .finally(() => setLoading(false));
+  }, [api]);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
+
+  return (
+    <div>
+      {toast && (
+        <div className="fixed top-4 right-4 z-50 bg-gray-900 text-white px-4 py-2 rounded-lg shadow-lg text-sm">
+          {toast}
+        </div>
+      )}
+
+      <PageHeader title="Admin Ops" subtitle="Audit trail and SIEM delivery status">
+        <button onClick={loadAll}
+          className="flex items-center gap-2 px-3 py-2 text-xs text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">
+          <RefreshCw className="w-3 h-3" /> Refresh
+        </button>
+      </PageHeader>
+
+      {loading ? <Spinner /> : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <Card className="p-4">
+            <h3 className="font-semibold text-gray-900 mb-3">Audit Logs</h3>
+            {auditLogs.length === 0 ? (
+              <EmptyState icon={Shield} title="No audit logs" subtitle="Admin actions will appear here." />
+            ) : (
+              <div className="space-y-3">
+                {auditLogs.map((l) => (
+                  <div key={l.id} className="text-xs text-gray-600 flex items-center gap-2">
+                    <span className="font-mono text-gray-800">{(l.action || '').padEnd(16, ' ')}</span>
+                    <span className="text-gray-500">by {l.actor}</span>
+                    {l.target && <span className="text-gray-400">→ {l.target}</span>}
+                    <span className="ml-auto text-gray-400">
+                      {l.timestamp ? new Date(l.timestamp).toLocaleString() : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <Card className="p-4">
+            <h3 className="font-semibold text-gray-900 mb-3">SIEM Deliveries</h3>
+            {siemDeliveries.length === 0 ? (
+              <EmptyState icon={FileText} title="No SIEM deliveries" subtitle="Report exports will appear here." />
+            ) : (
+              <div className="space-y-3">
+                {siemDeliveries.map((d) => (
+                  <div key={d.id} className="text-xs text-gray-600 flex items-center gap-2">
+                    <span className={`px-2 py-0.5 rounded-full text-xs ${
+                      d.status === 'delivered' ? 'bg-green-100 text-green-700' :
+                      d.status === 'failed' ? 'bg-red-100 text-red-700' :
+                      'bg-gray-100 text-gray-700'
+                    }`}>{d.status}</span>
+                    <span className="font-mono text-gray-800">{(d.report_id || '').slice(0, 8)}</span>
+                    <span className="text-gray-500">{d.scan_id?.slice(0, 8)}</span>
+                    <span className="ml-auto text-gray-400">
+                      {d.timestamp ? new Date(d.timestamp).toLocaleString() : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
     </div>
   );
 }

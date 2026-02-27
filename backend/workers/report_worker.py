@@ -83,6 +83,14 @@ def _mask_report(report: Dict) -> Dict:
     return masked
 
 
+def get_db():
+    mongo_url = os.getenv("MONGO_URL", "mongodb://localhost:27017/shadow_ai_hunter")
+    from pymongo import MongoClient
+
+    client = MongoClient(mongo_url, serverSelectionTimeoutMS=5000)
+    return client, client.shadow_ai_hunter
+
+
 # ---------------------------------------------------------------------------
 # Risk helpers
 # ---------------------------------------------------------------------------
@@ -414,7 +422,31 @@ def export_siem(report_payload: Dict) -> Dict:
         resp = requests.post(url, json=report_payload, timeout=10)
         if resp.status_code >= 400:
             raise RuntimeError(f"SIEM webhook failed: {resp.status_code}")
+        try:
+            client, db = get_db()
+            db.siem_deliveries.insert_one({
+                "status": "delivered",
+                "scan_id": report_payload.get("scan_id"),
+                "report_id": report_payload.get("report_id"),
+                "detail": {"status_code": resp.status_code},
+                "timestamp": now_utc(),
+            })
+            client.close()
+        except Exception:
+            pass
         return {"status": "delivered"}
     except Exception as e:
         logger.error(f"SIEM export failed: {e}")
+        try:
+            client, db = get_db()
+            db.siem_deliveries.insert_one({
+                "status": "failed",
+                "scan_id": report_payload.get("scan_id"),
+                "report_id": report_payload.get("report_id"),
+                "detail": {"error": str(e)},
+                "timestamp": now_utc(),
+            })
+            client.close()
+        except Exception:
+            pass
         raise

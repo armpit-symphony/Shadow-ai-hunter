@@ -47,6 +47,7 @@ lists_collection = db.lists
 baselines_collection = db.baselines
 ws_events_collection = db.ws_events
 audit_logs_collection = db.audit_logs
+siem_deliveries_collection = db.siem_deliveries
 
 # Security
 security = HTTPBearer()
@@ -104,6 +105,7 @@ async def lifespan(app: FastAPI):
         baselines_collection.create_index("segment", unique=True)
         audit_logs_collection.create_index("timestamp")
         ws_events_collection.create_index("created_at")
+        siem_deliveries_collection.create_index("timestamp")
         _configure_ttl_indexes()
 
         # Inject MongoDB into auth module so get_user() can query it
@@ -241,6 +243,19 @@ def _audit_log(action: str, actor: str, target: Optional[str] = None, meta: Opti
             "actor": actor,
             "target": target,
             "meta": meta or {},
+            "timestamp": now_utc(),
+        })
+    except Exception:
+        pass
+
+
+def _siem_log(status: str, scan_id: str, report_id: Optional[str] = None, detail: Optional[Dict] = None) -> None:
+    try:
+        siem_deliveries_collection.insert_one({
+            "status": status,
+            "scan_id": scan_id,
+            "report_id": report_id,
+            "detail": detail or {},
             "timestamp": now_utc(),
         })
     except Exception:
@@ -537,6 +552,36 @@ async def get_metrics(current_user: User = Depends(require_admin)):
     except Exception as e:
         logger.error(f"Error getting metrics: {e}")
         raise HTTPException(status_code=500, detail="Failed to get metrics")
+
+
+# ---------------------------------------------------------------------------
+# Admin Ops (audit + SIEM)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/admin/audit-logs")
+async def list_audit_logs(limit: int = 100, current_user: User = Depends(require_admin)):
+    """List audit logs."""
+    try:
+        logs = list(audit_logs_collection.find({}).sort("timestamp", -1).limit(limit))
+        for l in logs:
+            l["id"] = str(l.pop("_id"))
+        return {"logs": logs}
+    except Exception as e:
+        logger.error(f"Error listing audit logs: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list audit logs")
+
+
+@app.get("/api/admin/siem-deliveries")
+async def list_siem_deliveries(limit: int = 100, current_user: User = Depends(require_admin)):
+    """List SIEM delivery attempts."""
+    try:
+        deliveries = list(siem_deliveries_collection.find({}).sort("timestamp", -1).limit(limit))
+        for d in deliveries:
+            d["id"] = str(d.pop("_id"))
+        return {"deliveries": deliveries}
+    except Exception as e:
+        logger.error(f"Error listing SIEM deliveries: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list SIEM deliveries")
 
 
 # ---------------------------------------------------------------------------
@@ -1083,6 +1128,7 @@ async def generate_report(
                 "findings_count": len(findings),
             })
             if os.getenv("SIEM_WEBHOOK_URL"):
+                _siem_log("queued", scan_id, report_id=report_id, detail={"format": fmt})
                 report_queue.enqueue(
                     export_siem,
                     report_data.get("content") if fmt == "json" else {

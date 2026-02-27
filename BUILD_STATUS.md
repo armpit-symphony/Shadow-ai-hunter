@@ -1,72 +1,75 @@
-# Shadow AI Hunter - Build Status
+# Shadow AI Hunter — Build Status
 
-> Last updated: 2026-02-26
+> Last updated: 2026-02-27
 
-## ✅ Completed (PRs Merged)
+## ✅ Completed
 
-| PR | Status | Description |
-|----|--------|-------------|
-| #1 | ✅ Merged | Repo hygiene + security baseline |
-| #2 | ✅ Merged | JWT authentication + RBAC |
-| #3 | ✅ Merged | Worker swarm + job queue |
-
-## 🚧 In Progress / Pending
-
-| Item | Status | Notes |
+| Area | Status | Notes |
 |------|--------|-------|
-| Telemetry Ingestion | ✅ Done | `/api/telemetry/import` endpoint added |
-| Detection Engine | ✅ Done | Integrated with queue |
-| Reporting | ⚠️ Partial | JSON works, PDF placeholder |
-| CI/CD Security | ✅ Done | GitHub Actions + Trivy + Dependabot |
-| Scan API → Queue | ✅ Done | Connected to RQ |
-| LLM Agent Layer | ❌ Pending | Phase 2 |
+| JWT authentication + RBAC | ✅ | `auth.py` fully functional; users stored in MongoDB |
+| MongoDB user lookup | ✅ | No hardcoded credentials; `init_db()` injects collection at startup |
+| Default user seeding | ✅ | `server.py` seeds admin/analyst on first run from env vars |
+| RQ worker queue | ✅ | `queue.py` defines 5 named queues (scans, detection, telemetry, enrichment, reports) |
+| Scan API → Queue | ✅ | `/api/scan` enqueues to RQ; async fallback when Redis unavailable |
+| Real network scanning | ✅ | `scanner_worker.py` uses nmap (with TCP-connect fallback); detects 20+ AI service ports |
+| AI domain signatures | ✅ | `detector_worker.py` — 100+ domains across llm / code_ai / image_gen / ml_infra / voice_ai |
+| Evidence bundles | ✅ | SHA-256 tamper-evident bundles attached to every alert |
+| Telemetry ingestion | ✅ | `/api/telemetry/import` — DNS + proxy log parsing, normalisation, detection job dispatch |
+| Enrichment worker | ✅ | `enrichment_worker.py` — policy evaluation, asset criticality, per-device risk re-weighting |
+| PDF reports | ✅ | `report_worker.py` — real PDF via fpdf2 with colour-coded risk table; text fallback |
+| Reports API endpoint | ✅ | `POST /api/reports/generate`, `GET /api/reports` |
+| Worker container | ✅ | Separate `worker` service in docker-compose.yml with `NET_ADMIN`/`NET_RAW` caps |
+| TLS in nginx | ✅ | HTTPS-only; HTTP→HTTPS redirect; TLSv1.2/1.3; HSTS |
+| Security headers | ✅ | CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy |
+| Test suite | ✅ | 50+ unit + integration tests in `tests/` (detection, telemetry, auth, API) |
+| CI workflow | ✅ | Lint (ruff) + type-check (mypy) + pytest with coverage gate; Docker smoke-test |
+| Supply-chain scanning | ✅ | `security.yml` — pip-audit + Trivy container + config scan |
+| Dependabot | ✅ | `.github/dependabot.yml` configured |
 
-## 🔧 What's Missing / Needs Work
+## 🔧 Still To Do (V1 remaining / V2)
 
-### Critical (V1)
-- [x] **Scan API → Queue integration**: Connected `/api/scan` to RQ
-- [x] **Telemetry import endpoint**: `/api/telemetry/import` now available
-- [ ] **Worker processes**: Need to run as separate containers
-- [ ] **WebSocket updates**: Push scan progress to UI (partially done)
-- [ ] **Mongo models**: Events collection added
+### V1
+- [ ] **User management API** — `POST /api/users`, `PATCH /api/users/{id}` (admin only)
+- [ ] **Allowlist/denylist management API** — UI to edit per-deployment signatures
+- [ ] **Baseline persistence** — store known AI domains per network segment for heuristics
+- [ ] **WebSocket progress updates** — push per-device scan progress to UI in real time
+- [ ] **Frontend login page** — connect to `/api/auth/login`; store + send JWT token
 
-### Important (V1)
-- [ ] **Real PDF generation**: Currently placeholder
-- [ ] **User provisioning**: Admin UI to create users
-- [ ] **Allowlist/denylist management**: UI to edit signatures
-- [ ] **Baseline storage**: Store known AI domains for heuristic detection
+### V2+
+- [ ] LLM analysis agents (triage / remediation suggestions) — requires prompt injection guardrails
+- [ ] Auto-remediation actions (DNS block push, firewall rule integration)
+- [ ] Multi-tenant / organisation support
+- [ ] Kubernetes manifests (Helm chart)
+- [ ] SIEM export (Splunk HEC, Elastic, Sentinel)
 
-### Nice to Have (V2+)
-- [ ] LLM analysis agents
-- [ ] Auto-remediation
-- [ ] Multi-tenant support
-- [ ] Kubernetes manifests
-
-## 📋 Quick Start for Next Builder
+## 📋 Quick Start
 
 ```bash
-# Clone and setup
 git clone https://github.com/armpit-symphony/Shadow-ai-hunter.git
 cd Shadow-ai-hunter
 
-# Start services
-cp .env.example .env  # Edit with real secrets
+# Copy and edit env — CHANGE ALL PASSWORDS before production use
+cp .env.example .env
+
+# Start everything (backend + worker + frontend + nginx + mongo + redis)
 docker compose up -d
 
-# Backend runs on :8001
-# Frontend runs on :3000
+# Verify backend is up
+curl http://localhost:8001/api/health
 
-# Test auth (mock users)
-curl -X POST http://localhost:8001/api/v1/auth/login \
-  -d "username=admin&password=admin123"
+# Login (uses default seeded admin)
+curl -X POST http://localhost:8001/api/auth/login \
+  -d "username=admin&password=$(grep DEFAULT_ADMIN_PASSWORD .env | cut -d= -f2)"
+
+# Run tests
+cd backend && pip install -r requirements.txt -r ../requirements-dev.txt
+pytest ../tests/ -v
 ```
 
 ## 🔐 Security Notes
 
-- Demo users hardcoded in `auth_routes.py` - replace with DB lookup
-- No TLS in dev compose - add for production
-- Mongo/Redis auth needs real passwords in `.env`
-
-## 📞 Questions?
-
-Check BUILD.md for architecture details.
+- **Change all passwords** in `.env` before any deployment (`DEFAULT_ADMIN_PASSWORD`, `JWT_SECRET_KEY`, `MONGO_PASSWORD`)
+- Worker container has `NET_ADMIN` / `NET_RAW` caps for nmap — isolate on a dedicated scan VLAN
+- MongoDB port `27017` is bound to `127.0.0.1` only — do not expose externally
+- Redis port `6379` is bound to `127.0.0.1` only
+- nginx terminates TLS; self-signed certs are generated by `start.sh` — replace with CA-signed certs in production

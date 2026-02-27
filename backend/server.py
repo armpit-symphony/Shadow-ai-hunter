@@ -13,9 +13,11 @@ from contextlib import asynccontextmanager
 from uuid import uuid4
 
 # Import auth
+import auth as auth_module
 from auth import (
     User, UserRole, require_admin, require_analyst, require_viewer,
-    get_current_active_user
+    get_current_active_user, get_password_hash,
+    init_db as auth_init_db,
 )
 from auth_routes import router as auth_router
 
@@ -34,35 +36,87 @@ devices_collection = db.devices
 policies_collection = db.policies
 alerts_collection = db.alerts
 users_collection = db.users
+events_collection = db.events
+reports_collection = db.reports
 
 # Security
 security = HTTPBearer()
+
+
+def _seed_default_users() -> None:
+    """
+    Create default users on first run if the users collection is empty.
+    Passwords are read from environment variables.
+    WARNING: Change these before any production deployment.
+    """
+    admin_pass = os.getenv("DEFAULT_ADMIN_PASSWORD", "changeme-set-in-env")
+    analyst_pass = os.getenv("DEFAULT_ANALYST_PASSWORD", "changeme-set-in-env")
+
+    seed_users = [
+        {
+            "username": "admin",
+            "email": "admin@shadowai.local",
+            "full_name": "Admin User",
+            "role": "admin",
+            "hashed_password": get_password_hash(admin_pass),
+            "disabled": False,
+            "created_at": datetime.utcnow(),
+        },
+        {
+            "username": "analyst",
+            "email": "analyst@shadowai.local",
+            "full_name": "Security Analyst",
+            "role": "analyst",
+            "hashed_password": get_password_hash(analyst_pass),
+            "disabled": False,
+            "created_at": datetime.utcnow(),
+        },
+    ]
+    try:
+        users_collection.insert_many(seed_users)
+        logger.warning(
+            "Default users seeded. "
+            "Set DEFAULT_ADMIN_PASSWORD and DEFAULT_ANALYST_PASSWORD env vars "
+            "and change passwords before production use!"
+        )
+    except Exception as e:
+        logger.warning(f"Could not seed default users (may already exist): {e}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Shadow AI Hunter Backend...")
-    # Initialize collections with indexes
     try:
         scans_collection.create_index("timestamp")
         devices_collection.create_index("ip_address")
         alerts_collection.create_index("created_at")
+        users_collection.create_index("username", unique=True)
+
+        # Inject MongoDB into auth module so get_user() can query it
+        auth_init_db(users_collection)
+
+        # Seed default users if the collection is empty
+        if users_collection.count_documents({}) == 0:
+            _seed_default_users()
+
         logger.info("Database initialized successfully")
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
-    
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down Shadow AI Hunter Backend...")
     client.close()
+
 
 # FastAPI app with lifespan
 app = FastAPI(
     title="Shadow AI Hunter API",
     description="Enterprise AI Detection and Network Security Platform",
-    version="1.0.0",
-    lifespan=lifespan
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
 # CORS middleware
@@ -74,14 +128,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include auth routes
+# Include auth routes (prefix is /api/auth, set in auth_routes.py)
 app.include_router(auth_router)
 
+
+# ---------------------------------------------------------------------------
 # Pydantic models
+# ---------------------------------------------------------------------------
+
 class NetworkScanRequest(BaseModel):
     network_range: str
     scan_type: str = "basic"
     deep_scan: bool = False
+
 
 class Device(BaseModel):
     ip_address: str
@@ -92,6 +151,7 @@ class Device(BaseModel):
     last_seen: datetime
     status: str = "active"
 
+
 class PolicyRule(BaseModel):
     name: str
     description: str
@@ -100,6 +160,7 @@ class PolicyRule(BaseModel):
     actions: List[str]
     enabled: bool = True
     created_at: Optional[datetime] = None
+
 
 class Alert(BaseModel):
     title: str
@@ -110,6 +171,7 @@ class Alert(BaseModel):
     created_at: Optional[datetime] = None
     resolved: bool = False
 
+
 class DashboardStats(BaseModel):
     total_devices: int
     high_risk_devices: int
@@ -118,7 +180,16 @@ class DashboardStats(BaseModel):
     ai_services_blocked: int
     compliance_score: float
 
+
+class TelemetryImportRequest(BaseModel):
+    log_type: str  # "dns" or "proxy"
+    entries: List[Dict]
+
+
+# ---------------------------------------------------------------------------
 # WebSocket connection manager
+# ---------------------------------------------------------------------------
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -128,55 +199,73 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-
-    async def send_personal_message(self, message: str, websocket: WebSocket):
-        await websocket.send_text(message)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def broadcast(self, message: str):
+        dead = []
         for connection in self.active_connections:
             try:
                 await connection.send_text(message)
-            except:
-                pass
+            except Exception:
+                dead.append(connection)
+        for c in dead:
+            self.disconnect(c)
+
 
 manager = ConnectionManager()
 
-# Basic health check
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
 @app.get("/api/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow()}
 
-# Dashboard endpoints
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+
 @app.get("/api/dashboard/stats", response_model=DashboardStats)
 async def get_dashboard_stats(current_user: User = Depends(require_viewer)):
-    """Get overall dashboard statistics"""
+    """Get overall dashboard statistics."""
     try:
         total_devices = devices_collection.count_documents({})
         high_risk_devices = devices_collection.count_documents({"ai_risk_score": {"$gte": 0.7}})
-        active_threats = alerts_collection.count_documents({"resolved": False, "severity": {"$in": ["high", "critical"]}})
+        active_threats = alerts_collection.count_documents(
+            {"resolved": False, "severity": {"$in": ["high", "critical"]}}
+        )
         total_scans = scans_collection.count_documents({})
-        ai_services_blocked = policies_collection.count_documents({"rule_type": "block", "enabled": True})
-        
-        # Calculate compliance score based on policies and threats
+        ai_services_blocked = policies_collection.count_documents(
+            {"rule_type": "block", "enabled": True}
+        )
+
         compliance_score = max(0.0, 100.0 - (active_threats * 10) - (high_risk_devices * 5))
         compliance_score = min(100.0, compliance_score)
-        
+
         return DashboardStats(
             total_devices=total_devices,
             high_risk_devices=high_risk_devices,
             active_threats=active_threats,
             total_scans=total_scans,
             ai_services_blocked=ai_services_blocked,
-            compliance_score=compliance_score / 100.0
+            compliance_score=compliance_score / 100.0,
         )
     except Exception as e:
         logger.error(f"Error getting dashboard stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to get dashboard statistics")
 
+
+# ---------------------------------------------------------------------------
+# Devices
+# ---------------------------------------------------------------------------
+
 @app.get("/api/devices")
 async def get_devices(current_user: User = Depends(require_viewer)):
-    """Get all detected devices"""
+    """Get all detected devices sorted by risk score."""
     try:
         devices = list(devices_collection.find({}, {"_id": 0}).sort("ai_risk_score", -1))
         return {"devices": devices}
@@ -184,9 +273,14 @@ async def get_devices(current_user: User = Depends(require_viewer)):
         logger.error(f"Error getting devices: {e}")
         raise HTTPException(status_code=500, detail="Failed to get devices")
 
+
+# ---------------------------------------------------------------------------
+# Alerts
+# ---------------------------------------------------------------------------
+
 @app.get("/api/alerts")
 async def get_alerts(limit: int = 50, current_user: User = Depends(require_viewer)):
-    """Get recent alerts"""
+    """Get recent alerts."""
     try:
         alerts = list(alerts_collection.find({}, {"_id": 0}).sort("created_at", -1).limit(limit))
         return {"alerts": alerts}
@@ -194,9 +288,33 @@ async def get_alerts(limit: int = 50, current_user: User = Depends(require_viewe
         logger.error(f"Error getting alerts: {e}")
         raise HTTPException(status_code=500, detail="Failed to get alerts")
 
+
+@app.patch("/api/alerts/{alert_id}/resolve")
+async def resolve_alert(alert_id: str, current_user: User = Depends(require_analyst)):
+    """Mark an alert as resolved."""
+    try:
+        result = alerts_collection.update_one(
+            {"_id": alert_id},
+            {"$set": {"resolved": True, "resolved_at": datetime.utcnow(),
+                      "resolved_by": current_user.username}},
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        return {"message": "Alert resolved"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error resolving alert: {e}")
+        raise HTTPException(status_code=500, detail="Failed to resolve alert")
+
+
+# ---------------------------------------------------------------------------
+# Policies
+# ---------------------------------------------------------------------------
+
 @app.get("/api/policies")
 async def get_policies(current_user: User = Depends(require_viewer)):
-    """Get all policy rules"""
+    """Get all policy rules."""
     try:
         policies = list(policies_collection.find({}, {"_id": 0}).sort("created_at", -1))
         return {"policies": policies}
@@ -204,9 +322,10 @@ async def get_policies(current_user: User = Depends(require_viewer)):
         logger.error(f"Error getting policies: {e}")
         raise HTTPException(status_code=500, detail="Failed to get policies")
 
+
 @app.post("/api/policies")
 async def create_policy(policy: PolicyRule, current_user: User = Depends(require_analyst)):
-    """Create a new policy rule"""
+    """Create a new policy rule."""
     try:
         policy.created_at = datetime.utcnow()
         result = policies_collection.insert_one(policy.dict())
@@ -217,11 +336,18 @@ async def create_policy(policy: PolicyRule, current_user: User = Depends(require
         logger.error(f"Error creating policy: {e}")
         raise HTTPException(status_code=500, detail="Failed to create policy")
 
+
+# ---------------------------------------------------------------------------
+# Scans
+# ---------------------------------------------------------------------------
+
 @app.post("/api/scan")
-async def initiate_network_scan(scan_request: NetworkScanRequest, current_user: User = Depends(require_analyst)):
-    """Start a network scan"""
+async def initiate_network_scan(
+    scan_request: NetworkScanRequest,
+    current_user: User = Depends(require_analyst),
+):
+    """Start a network scan. Jobs are enqueued to the RQ worker."""
     try:
-        # Create scan record
         scan_id = str(uuid4())
         scan_data = {
             "_id": scan_id,
@@ -232,286 +358,67 @@ async def initiate_network_scan(scan_request: NetworkScanRequest, current_user: 
             "timestamp": datetime.utcnow(),
             "devices_found": 0,
             "ai_services_detected": 0,
-            "initiated_by": current_user.username
+            "initiated_by": current_user.username,
         }
         scans_collection.insert_one(scan_data)
-        
-        # Enqueue job to RQ (optional - falls back to async if Redis unavailable)
+
+        # Enqueue to RQ worker
+        enqueued = False
         try:
             from workers.queue import scan_queue
             from workers.scanner_worker import network_discovery_scan
-            job = scan_queue.enqueue(
+
+            scan_queue.enqueue(
                 network_discovery_scan,
                 scan_request.network_range,
                 scan_id,
-                job_id=scan_id
+                job_id=scan_id,
             )
-            logger.info(f"[{scan_id}] Scan enqueued to job queue")
+            enqueued = True
+            logger.info(f"[{scan_id}] Scan enqueued to RQ worker")
         except Exception as e:
-            logger.warning(f"RQ not available, using async: {e}")
-            # Fallback to async task
-            asyncio.create_task(perform_network_scan(scan_id, scan_request))
-        
-        return {"message": "Scan initiated", "scan_id": scan_id, "status": "queued"}
+            logger.warning(f"RQ unavailable, using async fallback: {e}")
+            asyncio.create_task(_async_scan_fallback(scan_id, scan_request))
+
+        return {
+            "message": "Scan initiated",
+            "scan_id": scan_id,
+            "status": "queued",
+            "worker": "rq" if enqueued else "async-fallback",
+        }
     except Exception as e:
         logger.error(f"Error initiating scan: {e}")
         raise HTTPException(status_code=500, detail="Failed to initiate network scan")
 
-async def perform_network_scan(scan_id: str, scan_request: NetworkScanRequest):
-    """Background task for network scanning"""
-    try:
-        # Simulate network scanning process
-        await asyncio.sleep(2)  # Simulate scan time
-        
-        # Mock discovered devices for demo
-        mock_devices = [
-            {
-                "ip_address": "192.168.1.10",
-                "hostname": "workstation-01",
-                "device_type": "workstation",
-                "ai_risk_score": 0.8,
-                "ai_services_detected": ["openai-api", "claude-api"],
-                "last_seen": datetime.utcnow(),
-                "status": "active"
-            },
-            {
-                "ip_address": "192.168.1.15",
-                "hostname": "server-ai-01",
-                "device_type": "server",
-                "ai_risk_score": 0.9,
-                "ai_services_detected": ["huggingface", "tensorflow-serving"],
-                "last_seen": datetime.utcnow(),
-                "status": "active"
-            },
-            {
-                "ip_address": "192.168.1.25",
-                "hostname": "mobile-device",
-                "device_type": "mobile",
-                "ai_risk_score": 0.3,
-                "ai_services_detected": ["chatgpt-app"],
-                "last_seen": datetime.utcnow(),
-                "status": "active"
-            }
-        ]
-        
-        # Store devices
-        for device in mock_devices:
-            devices_collection.replace_one(
-                {"ip_address": device["ip_address"]}, 
-                device, 
-                upsert=True
-            )
-        
-        # Generate alerts for high-risk devices
-        for device in mock_devices:
-            if device["ai_risk_score"] > 0.7:
-                alert = {
-                    "title": f"High AI Risk Detected - {device['hostname']}",
-                    "description": f"Device {device['ip_address']} detected using unauthorized AI services: {', '.join(device['ai_services_detected'])}",
-                    "severity": "high" if device["ai_risk_score"] > 0.8 else "medium",
-                    "device_ip": device["ip_address"],
-                    "alert_type": "ai_detection",
-                    "created_at": datetime.utcnow(),
-                    "resolved": False
-                }
-                alerts_collection.insert_one(alert)
-        
-        # Update scan status
-        scans_collection.update_one(
-            {"_id": scan_id}, 
-            {
-                "$set": {
-                    "status": "completed",
-                    "devices_found": len(mock_devices),
-                    "ai_services_detected": sum(len(d["ai_services_detected"]) for d in mock_devices),
-                    "completed_at": datetime.utcnow()
-                }
-            }
-        )
-        
-        # Broadcast scan completion via WebSocket
-        await manager.broadcast(json.dumps({
-            "type": "scan_completed",
-            "scan_id": scan_id,
-            "devices_found": len(mock_devices)
-        }))
-        
-    except Exception as e:
-        logger.error(f"Error in network scan: {e}")
-        # Update scan status to failed
-        scans_collection.update_one(
-            {"_id": scan_id}, 
-            {"$set": {"status": "failed", "error": str(e)}}
-        )
 
-@app.websocket("/api/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time updates"""
-    await manager.connect(websocket)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            # Echo back for now
-            await manager.send_personal_message(f"Echo: {data}", websocket)
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-
-@app.get("/api/demo/populate")
-async def populate_demo_data(current_user: User = Depends(require_admin)):
-    """Populate database with demo data (admin only)"""
-    try:
-        # Clear existing data
-        devices_collection.delete_many({})
-        alerts_collection.delete_many({})
-        policies_collection.delete_many({})
-        
-        # Add demo devices
-        demo_devices = [
-            {
-                "ip_address": "10.0.1.100",
-                "hostname": "exec-laptop-01",
-                "device_type": "laptop",
-                "ai_risk_score": 0.95,
-                "ai_services_detected": ["openai-gpt4", "claude-3", "midjourney"],
-                "last_seen": datetime.utcnow(),
-                "status": "active"
-            },
-            {
-                "ip_address": "10.0.1.150",
-                "hostname": "dev-workstation",
-                "device_type": "workstation", 
-                "ai_risk_score": 0.75,
-                "ai_services_detected": ["github-copilot", "codeium"],
-                "last_seen": datetime.utcnow(),
-                "status": "active"
-            },
-            {
-                "ip_address": "10.0.1.200",
-                "hostname": "ml-server-prod",
-                "device_type": "server",
-                "ai_risk_score": 0.85,
-                "ai_services_detected": ["tensorflow", "pytorch", "huggingface"],
-                "last_seen": datetime.utcnow(),
-                "status": "active"
-            }
-        ]
-        devices_collection.insert_many(demo_devices)
-        
-        # Add demo policies
-        demo_policies = [
-            {
-                "name": "Block Unauthorized AI APIs",
-                "description": "Automatically block access to unauthorized AI services",
-                "rule_type": "block",
-                "conditions": {"ai_services": ["openai-api", "claude-api"]},
-                "actions": ["block_network", "send_alert"],
-                "enabled": True,
-                "created_at": datetime.utcnow()
-            },
-            {
-                "name": "Monitor High-Risk Devices",
-                "description": "Alert on devices with AI risk score > 0.8",
-                "rule_type": "monitor",
-                "conditions": {"ai_risk_score": {"$gte": 0.8}},
-                "actions": ["send_alert", "log_activity"],
-                "enabled": True,
-                "created_at": datetime.utcnow()
-            }
-        ]
-        policies_collection.insert_many(demo_policies)
-        
-        # Add demo alerts
-        demo_alerts = [
-            {
-                "title": "Critical: Unauthorized AI Usage Detected",
-                "description": "Executive laptop accessing multiple AI services without approval",
-                "severity": "critical",
-                "device_ip": "10.0.1.100",
-                "alert_type": "policy_violation",
-                "created_at": datetime.utcnow(),
-                "resolved": False
-            },
-            {
-                "title": "High Risk: ML Server Anomaly",
-                "description": "Production ML server showing unusual AI service patterns",
-                "severity": "high",
-                "device_ip": "10.0.1.200",
-                "alert_type": "anomaly_detection",
-                "created_at": datetime.utcnow() - timedelta(hours=2),
-                "resolved": False
-            }
-        ]
-        alerts_collection.insert_many(demo_alerts)
-        
-        return {"message": "Demo data populated successfully"}
-    except Exception as e:
-        logger.error(f"Error populating demo data: {e}")
-        raise HTTPException(status_code=500, detail="Failed to populate demo data")
-
-
-# Telemetry Import Endpoint
-class TelemetryImportRequest(BaseModel):
-    log_type: str  # "dns" or "proxy"
-    entries: List[Dict]
-
-
-@app.post("/api/telemetry/import")
-async def import_telemetry(
-    import_request: TelemetryImportRequest,
-    current_user: User = Depends(require_admin)
-):
+async def _async_scan_fallback(scan_id: str, scan_request: NetworkScanRequest):
     """
-    Import telemetry logs for analysis
-    Accepts DNS or Proxy logs, normalizes and stores events
+    Async fallback when RQ worker is unavailable.
+    Runs the real scanner_worker function in a thread pool so it doesn't block.
     """
+    import asyncio
+
+    loop = asyncio.get_event_loop()
     try:
-        scan_id = str(uuid4())
-        
-        # Create scan/import record
-        import_data = {
-            "_id": scan_id,
-            "log_type": import_request.log_type,
-            "status": "processing",
-            "timestamp": datetime.utcnow(),
-            "entries_count": len(import_request.entries),
-            "imported_by": current_user.username
-        }
-        
-        # Store raw entries
-        events_collection = db.events
-        events_collection.insert_many(import_request.entries)
-        
-        import_data["status"] = "completed"
-        import_data["completed_at"] = datetime.utcnow()
-        
-        # Enqueue detection job
-        try:
-            from workers.queue import detection_queue
-            from workers.detector_worker import run_detection
-            job = detection_queue.enqueue(
-                run_detection,
-                scan_id,
-                import_request.entries,
-                job_id=f"detect-{scan_id}"
-            )
-            import_data["detection_job_id"] = job.id
-        except Exception as e:
-            logger.warning(f"RQ not available for detection: {e}")
-        
-        return {
-            "message": "Telemetry imported successfully",
-            "import_id": scan_id,
-            "entries_processed": len(import_request.entries),
-            "status": "completed"
-        }
+        from workers.scanner_worker import network_discovery_scan
+
+        await loop.run_in_executor(
+            None, network_discovery_scan, scan_request.network_range, scan_id
+        )
+        await manager.broadcast(
+            json.dumps({"type": "scan_completed", "scan_id": scan_id})
+        )
     except Exception as e:
-        logger.error(f"Error importing telemetry: {e}")
-        raise HTTPException(status_code=500, detail="Failed to import telemetry")
+        logger.error(f"Async scan fallback failed [{scan_id}]: {e}")
+        scans_collection.update_one(
+            {"_id": scan_id},
+            {"$set": {"status": "failed", "error": str(e)}},
+        )
 
 
 @app.get("/api/scans")
 async def get_scans(limit: int = 50, current_user: User = Depends(require_viewer)):
-    """Get scan history"""
+    """Get scan history."""
     try:
         scans = list(scans_collection.find({}, {"_id": 0}).sort("timestamp", -1).limit(limit))
         return {"scans": scans}
@@ -522,7 +429,7 @@ async def get_scans(limit: int = 50, current_user: User = Depends(require_viewer
 
 @app.get("/api/scans/{scan_id}")
 async def get_scan(scan_id: str, current_user: User = Depends(require_viewer)):
-    """Get specific scan details"""
+    """Get specific scan details including evidence."""
     try:
         scan = scans_collection.find_one({"_id": scan_id}, {"_id": 0})
         if not scan:
@@ -535,6 +442,282 @@ async def get_scan(scan_id: str, current_user: User = Depends(require_viewer)):
         raise HTTPException(status_code=500, detail="Failed to get scan")
 
 
+# ---------------------------------------------------------------------------
+# Telemetry ingestion
+# ---------------------------------------------------------------------------
+
+@app.post("/api/telemetry/import")
+async def import_telemetry(
+    import_request: TelemetryImportRequest,
+    current_user: User = Depends(require_analyst),
+):
+    """
+    Import telemetry logs (DNS or Proxy) for AI detection analysis.
+    Normalizes events, stores them, and enqueues a detection job.
+    """
+    try:
+        import_id = str(uuid4())
+
+        # Store raw entries with import metadata
+        tagged_entries = [
+            {**e, "_import_id": import_id, "_log_type": import_request.log_type}
+            for e in import_request.entries
+        ]
+        if tagged_entries:
+            events_collection.insert_many(tagged_entries)
+
+        # Record the import
+        import_record = {
+            "_id": import_id,
+            "log_type": import_request.log_type,
+            "status": "processing",
+            "timestamp": datetime.utcnow(),
+            "entries_count": len(import_request.entries),
+            "imported_by": current_user.username,
+        }
+        scans_collection.insert_one(import_record)
+
+        # Enqueue detection job
+        detection_job_id = None
+        try:
+            from workers.queue import detection_queue
+            from workers.detector_worker import run_detection
+
+            job = detection_queue.enqueue(
+                run_detection,
+                import_id,
+                import_request.entries,
+                job_id=f"detect-{import_id}",
+            )
+            detection_job_id = job.id
+            scans_collection.update_one(
+                {"_id": import_id},
+                {"$set": {"status": "queued_detection", "detection_job_id": detection_job_id}},
+            )
+        except Exception as e:
+            logger.warning(f"RQ unavailable for detection job: {e}")
+            scans_collection.update_one(
+                {"_id": import_id},
+                {"$set": {"status": "completed", "completed_at": datetime.utcnow()}},
+            )
+
+        return {
+            "message": "Telemetry imported successfully",
+            "import_id": import_id,
+            "entries_processed": len(import_request.entries),
+            "detection_job_id": detection_job_id,
+            "status": "processing",
+        }
+    except Exception as e:
+        logger.error(f"Error importing telemetry: {e}")
+        raise HTTPException(status_code=500, detail="Failed to import telemetry")
+
+
+# ---------------------------------------------------------------------------
+# Reports
+# ---------------------------------------------------------------------------
+
+@app.post("/api/reports/generate")
+async def generate_report(
+    scan_id: str,
+    fmt: str = "json",
+    current_user: User = Depends(require_analyst),
+):
+    """Generate a security report for a completed scan."""
+    try:
+        scan = scans_collection.find_one({"_id": scan_id})
+        if not scan:
+            raise HTTPException(status_code=404, detail="Scan not found")
+
+        findings = list(alerts_collection.find({"scan_id": scan_id}, {"_id": 0}))
+
+        report_id = str(uuid4())
+        try:
+            from workers.report_worker import create_report
+
+            report_data = create_report(scan_id, scan, findings, format=fmt)
+            # Store report metadata
+            reports_collection.insert_one({
+                "_id": report_id,
+                "scan_id": scan_id,
+                "format": fmt,
+                "generated_by": current_user.username,
+                "generated_at": datetime.utcnow(),
+                "findings_count": len(findings),
+            })
+            return {
+                "report_id": report_id,
+                "scan_id": scan_id,
+                "format": fmt,
+                "report": report_data.get("content") if fmt == "json" else None,
+                "message": "Report generated successfully",
+            }
+        except Exception as e:
+            logger.error(f"Error generating report: {e}")
+            raise HTTPException(status_code=500, detail=f"Report generation failed: {e}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in report endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate report")
+
+
+@app.get("/api/reports")
+async def list_reports(current_user: User = Depends(require_viewer)):
+    """List generated reports."""
+    try:
+        rpts = list(reports_collection.find({}, {"_id": 0}).sort("generated_at", -1).limit(50))
+        return {"reports": rpts}
+    except Exception as e:
+        logger.error(f"Error listing reports: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list reports")
+
+
+# ---------------------------------------------------------------------------
+# WebSocket
+# ---------------------------------------------------------------------------
+
+@app.websocket("/api/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time scan/alert updates."""
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await manager.broadcast(data)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+
+# ---------------------------------------------------------------------------
+# Demo data (admin only)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/demo/populate")
+async def populate_demo_data(current_user: User = Depends(require_admin)):
+    """Populate database with demo data. Admin only."""
+    try:
+        devices_collection.delete_many({})
+        alerts_collection.delete_many({})
+        policies_collection.delete_many({})
+
+        demo_devices = [
+            {
+                "ip_address": "10.0.1.100",
+                "hostname": "exec-laptop-01",
+                "device_type": "laptop",
+                "ai_risk_score": 0.95,
+                "ai_services_detected": ["openai-gpt4", "claude-3", "midjourney"],
+                "evidence": [
+                    {"type": "telemetry_dns", "indicator": "api.openai.com", "severity": "high"},
+                    {"type": "telemetry_dns", "indicator": "api.anthropic.com", "severity": "high"},
+                ],
+                "last_seen": datetime.utcnow(),
+                "status": "active",
+            },
+            {
+                "ip_address": "10.0.1.150",
+                "hostname": "dev-workstation",
+                "device_type": "workstation",
+                "ai_risk_score": 0.75,
+                "ai_services_detected": ["github-copilot", "codeium"],
+                "evidence": [
+                    {"type": "telemetry_proxy", "indicator": "copilot-proxy.githubusercontent.com",
+                     "severity": "medium"},
+                ],
+                "last_seen": datetime.utcnow(),
+                "status": "active",
+            },
+            {
+                "ip_address": "10.0.1.200",
+                "hostname": "ml-server-prod",
+                "device_type": "ml-server",
+                "ai_risk_score": 0.85,
+                "ai_services_detected": ["tensorflow", "pytorch", "huggingface"],
+                "evidence": [
+                    {"type": "open_ai_port", "port": 8501, "service": "TensorFlow Serving REST",
+                     "severity": "high"},
+                    {"type": "open_ai_port", "port": 8888, "service": "Jupyter Notebook",
+                     "severity": "medium"},
+                ],
+                "last_seen": datetime.utcnow(),
+                "status": "active",
+            },
+        ]
+        devices_collection.insert_many(demo_devices)
+
+        demo_policies = [
+            {
+                "name": "Block Unauthorized LLM APIs",
+                "description": "Block access to external LLM API endpoints not on the approved list",
+                "rule_type": "block",
+                "conditions": {"categories": ["llm"], "allowlist_bypass": False},
+                "actions": ["block_network", "send_alert", "log_activity"],
+                "enabled": True,
+                "created_at": datetime.utcnow(),
+            },
+            {
+                "name": "Monitor High-Risk Devices",
+                "description": "Alert on devices with AI risk score >= 0.8",
+                "rule_type": "monitor",
+                "conditions": {"ai_risk_score": {"$gte": 0.8}},
+                "actions": ["send_alert", "log_activity"],
+                "enabled": True,
+                "created_at": datetime.utcnow(),
+            },
+            {
+                "name": "Audit Local AI Services",
+                "description": "Flag any device running a local LLM service (Ollama, LocalAI, etc.)",
+                "rule_type": "audit",
+                "conditions": {"open_ai_ports": True},
+                "actions": ["send_alert", "require_approval"],
+                "enabled": True,
+                "created_at": datetime.utcnow(),
+            },
+        ]
+        policies_collection.insert_many(demo_policies)
+
+        demo_alerts = [
+            {
+                "title": "Critical: Unauthorized AI Usage — exec-laptop-01",
+                "description": (
+                    "Executive laptop (10.0.1.100) is accessing multiple external AI services "
+                    "without IT approval: openai-gpt4, claude-3, midjourney."
+                ),
+                "severity": "critical",
+                "device_ip": "10.0.1.100",
+                "alert_type": "policy_violation",
+                "evidence": [
+                    {"type": "telemetry_dns", "indicator": "api.openai.com", "confidence": 0.95},
+                ],
+                "created_at": datetime.utcnow(),
+                "resolved": False,
+            },
+            {
+                "title": "High: Unmanaged ML Server Detected",
+                "description": (
+                    "ml-server-prod (10.0.1.200) has TensorFlow Serving and Jupyter Notebook "
+                    "exposed on the network with no registered IT asset record."
+                ),
+                "severity": "high",
+                "device_ip": "10.0.1.200",
+                "alert_type": "ai_service_discovered",
+                "evidence": [
+                    {"type": "open_ai_port", "port": 8501, "severity": "high"},
+                ],
+                "created_at": datetime.utcnow() - timedelta(hours=2),
+                "resolved": False,
+            },
+        ]
+        alerts_collection.insert_many(demo_alerts)
+
+        return {"message": "Demo data populated successfully"}
+    except Exception as e:
+        logger.error(f"Error populating demo data: {e}")
+        raise HTTPException(status_code=500, detail="Failed to populate demo data")
+
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8001)

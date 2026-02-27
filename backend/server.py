@@ -267,7 +267,9 @@ async def get_dashboard_stats(current_user: User = Depends(require_viewer)):
 async def get_devices(current_user: User = Depends(require_viewer)):
     """Get all detected devices sorted by risk score."""
     try:
-        devices = list(devices_collection.find({}, {"_id": 0}).sort("ai_risk_score", -1))
+        devices = list(devices_collection.find({}).sort("ai_risk_score", -1))
+        for d in devices:
+            d["id"] = str(d.pop("_id"))
         return {"devices": devices}
     except Exception as e:
         logger.error(f"Error getting devices: {e}")
@@ -280,9 +282,11 @@ async def get_devices(current_user: User = Depends(require_viewer)):
 
 @app.get("/api/alerts")
 async def get_alerts(limit: int = 50, current_user: User = Depends(require_viewer)):
-    """Get recent alerts."""
+    """Get recent alerts, each with a stringified 'id' field."""
     try:
-        alerts = list(alerts_collection.find({}, {"_id": 0}).sort("created_at", -1).limit(limit))
+        alerts = list(alerts_collection.find({}).sort("created_at", -1).limit(limit))
+        for a in alerts:
+            a["id"] = str(a.pop("_id"))
         return {"alerts": alerts}
     except Exception as e:
         logger.error(f"Error getting alerts: {e}")
@@ -291,16 +295,30 @@ async def get_alerts(limit: int = 50, current_user: User = Depends(require_viewe
 
 @app.patch("/api/alerts/{alert_id}/resolve")
 async def resolve_alert(alert_id: str, current_user: User = Depends(require_analyst)):
-    """Mark an alert as resolved."""
+    """Mark an alert as resolved. Works with both ObjectId and string _id values."""
+    from bson import ObjectId
+
+    # Try ObjectId first (auto-generated), fall back to raw string (custom IDs)
+    queries = []
     try:
-        result = alerts_collection.update_one(
-            {"_id": alert_id},
-            {"$set": {"resolved": True, "resolved_at": datetime.utcnow(),
-                      "resolved_by": current_user.username}},
-        )
-        if result.matched_count == 0:
-            raise HTTPException(status_code=404, detail="Alert not found")
-        return {"message": "Alert resolved"}
+        queries.append({"_id": ObjectId(alert_id)})
+    except Exception:
+        pass
+    queries.append({"_id": alert_id})
+
+    try:
+        for q in queries:
+            result = alerts_collection.update_one(
+                q,
+                {"$set": {
+                    "resolved": True,
+                    "resolved_at": datetime.utcnow(),
+                    "resolved_by": current_user.username,
+                }},
+            )
+            if result.matched_count > 0:
+                return {"message": "Alert resolved"}
+        raise HTTPException(status_code=404, detail="Alert not found")
     except HTTPException:
         raise
     except Exception as e:

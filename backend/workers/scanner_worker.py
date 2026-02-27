@@ -391,7 +391,7 @@ def network_discovery_scan(network_range: str, scan_id: str) -> Dict:
     try:
         _client, _db = get_db()
         _db.scans.update_one(
-            {"_id": scan_id},
+            {"_id": scan_id, "status": {"$in": ["queued", "running"]}},
             {"$set": {"status": "running", "started_at": now_utc()}},
         )
         _emit_ws_event(_db, {
@@ -417,7 +417,7 @@ def network_discovery_scan(network_range: str, scan_id: str) -> Dict:
         logger.error(f"[{scan_id}] Scan execution failed: {e}")
         if _db is not None:
             _db.scans.update_one(
-                {"_id": scan_id},
+                {"_id": scan_id, "status": {"$in": ["queued", "running"]}},
                 {"$set": {"status": "failed", "error": str(e)}},
             )
             _emit_ws_event(_db, {
@@ -497,7 +497,7 @@ def network_discovery_scan(network_range: str, scan_id: str) -> Dict:
                 )
 
         _db.scans.update_one(
-            {"_id": scan_id},
+            {"_id": scan_id, "status": {"$in": ["running"]}},
             {
                 "$set": {
                     "status": "completed",

@@ -99,6 +99,9 @@ async def lifespan(app: FastAPI):
         devices_collection.create_index("ip_address")
         alerts_collection.create_index("created_at")
         users_collection.create_index("username", unique=True)
+        baselines_collection.create_index("segment", unique=True)
+        audit_logs_collection.create_index("timestamp")
+        ws_events_collection.create_index("created_at")
 
         # Inject MongoDB into auth module so get_user() can query it
         auth_init_db(users_collection)
@@ -133,6 +136,27 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+# ---------------------------------------------------------------------------
+# Structured request logging
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def request_logger(request: Request, call_next):
+    req_id = str(uuid4())
+    start = datetime.now().timestamp()
+    response = await call_next(request)
+    duration_ms = int((datetime.now().timestamp() - start) * 1000)
+    response.headers["X-Request-ID"] = req_id
+    logger.info(json.dumps({
+        "request_id": req_id,
+        "method": request.method,
+        "path": request.url.path,
+        "status": response.status_code,
+        "duration_ms": duration_ms,
+        "client_ip": request.client.host if request.client else "unknown",
+    }))
+    return response
 
 # CORS middleware
 app.add_middleware(
@@ -218,6 +242,18 @@ def _audit_log(action: str, actor: str, target: Optional[str] = None, meta: Opti
         })
     except Exception:
         pass
+
+
+def _scan_transition(scan_id: str, from_statuses: List[str], to_status: str, extra: Optional[Dict] = None) -> bool:
+    """Atomic scan state transition to avoid invalid states."""
+    update = {"status": to_status, "updated_at": now_utc()}
+    if extra:
+        update.update(extra)
+    result = scans_collection.update_one(
+        {"_id": scan_id, "status": {"$in": from_statuses}},
+        {"$set": update},
+    )
+    return result.matched_count > 0
 
 class NetworkScanRequest(BaseModel):
     network_range: str
@@ -422,6 +458,49 @@ async def get_dashboard_stats(current_user: User = Depends(require_viewer)):
     except Exception as e:
         logger.error(f"Error getting dashboard stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to get dashboard statistics")
+
+
+# ---------------------------------------------------------------------------
+# Metrics (basic)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/metrics")
+async def get_metrics(current_user: User = Depends(require_admin)):
+    """Basic operational metrics for administrators."""
+    try:
+        total_scans = scans_collection.count_documents({})
+        running_scans = scans_collection.count_documents({"status": "running"})
+        failed_scans = scans_collection.count_documents({"status": "failed"})
+        queued_scans = scans_collection.count_documents({"status": "queued"})
+        alerts_open = alerts_collection.count_documents({"resolved": False})
+
+        recent = list(scans_collection.find(
+            {"completed_at": {"$exists": True}, "started_at": {"$exists": True}},
+            {"started_at": 1, "completed_at": 1},
+        ).sort("completed_at", -1).limit(20))
+        durations = []
+        for s in recent:
+            try:
+                durations.append((s["completed_at"] - s["started_at"]).total_seconds())
+            except Exception:
+                pass
+        avg_duration = sum(durations) / len(durations) if durations else 0.0
+
+        return {
+            "scans": {
+                "total": total_scans,
+                "running": running_scans,
+                "failed": failed_scans,
+                "queued": queued_scans,
+                "avg_duration_seconds": round(avg_duration, 2),
+            },
+            "alerts": {
+                "open": alerts_open,
+            },
+        }
+    except Exception as e:
+        logger.error(f"Error getting metrics: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get metrics")
 
 
 # ---------------------------------------------------------------------------
@@ -759,6 +838,7 @@ async def initiate_network_scan(
             "deep_scan": scan_request.deep_scan,
             "status": "queued",
             "timestamp": now_utc(),
+            "updated_at": now_utc(),
             "devices_found": 0,
             "ai_services_detected": 0,
             "initiated_by": current_user.username,

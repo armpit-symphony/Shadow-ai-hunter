@@ -193,6 +193,11 @@ response = requests.post("http://localhost:8001/api/scan", json={
 print(f"Scan initiated: {response.json()['scan_id']}")
 ```
 
+### Admin Metrics
+```bash
+curl -H "Authorization: Bearer <admin_token>" http://localhost:8001/api/metrics
+```
+
 ### Creating Security Policies
 ```python
 # Create AI blocking policy

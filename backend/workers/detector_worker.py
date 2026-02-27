@@ -543,7 +543,7 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
                 _db.alerts.insert_one(alert)
 
         _db.scans.update_one(
-            {"_id": scan_id},
+            {"_id": scan_id, "status": {"$in": ["queued_detection", "processing", "running", "completed"]}},
             {
                 "$set": {
                     "status": "completed",

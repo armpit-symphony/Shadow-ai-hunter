@@ -31,33 +31,50 @@ export function AuthProvider({ children }) {
 
   // Single stable axios instance — never recreated across renders
   const apiRef = useRef(
-    axios.create({ baseURL: API_BASE_URL, timeout: 15000 })
+    axios.create({ baseURL: API_BASE_URL, timeout: 15000, withCredentials: true })
   );
   const api = apiRef.current;
 
+  const getCookie = (name) => {
+    const match = document.cookie.match(new RegExp(`(^| )${name}=([^;]+)`));
+    return match ? decodeURIComponent(match[2]) : '';
+  };
+
   const logout = useCallback(() => {
-    localStorage.removeItem('shadow_ai_token');
+    api.post('/api/auth/logout').catch(() => {});
     setUser(null);
-  }, []);
+  }, [api]);
 
   // ── Interceptors ─────────────────────────────────────────────────────────
   useEffect(() => {
     // Attach token to every outgoing request
     const reqId = api.interceptors.request.use((config) => {
-      const token = localStorage.getItem('shadow_ai_token');
-      if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
+      const method = (config.method || 'get').toLowerCase();
+      if (['post', 'put', 'patch', 'delete'].includes(method)) {
+        const csrf = getCookie('csrf_token');
+        if (csrf) {
+          config.headers['X-CSRF-Token'] = csrf;
+        }
       }
       return config;
     });
 
     // Auto-logout on 401 (skip the auth endpoints themselves to avoid loops)
+    let refreshing = false;
     const resId = api.interceptors.response.use(
       (response) => response,
-      (error) => {
+      async (error) => {
         const isAuthEndpoint = error.config?.url?.includes('/api/auth/');
-        if (error.response?.status === 401 && !isAuthEndpoint) {
-          logout();
+        if (error.response?.status === 401 && !isAuthEndpoint && !refreshing) {
+          try {
+            refreshing = true;
+            await api.post('/api/auth/refresh');
+            refreshing = false;
+            return api.request(error.config);
+          } catch {
+            refreshing = false;
+            logout();
+          }
         }
         return Promise.reject(error);
       }
@@ -76,14 +93,8 @@ export function AuthProvider({ children }) {
     body.append('username', username);
     body.append('password', password);
 
-    const tokenRes = await axios.post(`${API_BASE_URL}/api/auth/login`, body);
-    const { access_token } = tokenRes.data;
-    localStorage.setItem('shadow_ai_token', access_token);
-
-    // Fetch full user profile with the new token
-    const meRes = await axios.get(`${API_BASE_URL}/api/auth/me`, {
-      headers: { Authorization: `Bearer ${access_token}` },
-    });
+    await api.post('/api/auth/login', body);
+    const meRes = await api.get('/api/auth/me');
     setUser(meRes.data);
     return meRes.data;
   };
@@ -91,20 +102,11 @@ export function AuthProvider({ children }) {
   // ── Validate stored token on mount ────────────────────────────────────────
   useEffect(() => {
     const validate = async () => {
-      const token = localStorage.getItem('shadow_ai_token');
-      if (!token) {
-        setLoading(false);
-        return;
-      }
       try {
-        const res = await axios.get(`${API_BASE_URL}/api/auth/me`, {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 5000,
-        });
+        const res = await api.get('/api/auth/me', { timeout: 5000 });
         setUser(res.data);
       } catch {
-        // Token expired or invalid — clear it silently
-        localStorage.removeItem('shadow_ai_token');
+        // Token expired or invalid — clear state
       } finally {
         setLoading(false);
       }

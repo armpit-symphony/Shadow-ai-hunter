@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException, Depends, status, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, status, WebSocket, WebSocketDisconnect, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pymongo import MongoClient
@@ -43,6 +44,7 @@ reports_collection = db.reports
 lists_collection = db.lists
 baselines_collection = db.baselines
 ws_events_collection = db.ws_events
+audit_logs_collection = db.audit_logs
 
 # Security
 security = HTTPBearer()
@@ -141,6 +143,58 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ---------------------------------------------------------------------------
+# Basic rate limiting + CSRF protection
+# ---------------------------------------------------------------------------
+
+_RATE_LIMITS = {
+    ("POST", "/api/auth/login"): (10, 60),
+    ("POST", "/api/scan"): (5, 60),
+    ("POST", "/api/telemetry/import"): (10, 60),
+}
+_rate_state: Dict[str, List[float]] = {}
+_csrf_allowed = set(
+    os.getenv(
+        "CSRF_ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",")
+)
+
+
+@app.middleware("http")
+async def rate_limit_and_csrf(request: Request, call_next):
+    # Rate limiting
+    key = (request.method, request.url.path)
+    limit = _RATE_LIMITS.get(key)
+    if limit:
+        max_req, window = limit
+        ident = request.client.host if request.client else "unknown"
+        bucket_key = f"{ident}:{request.method}:{request.url.path}"
+        now = datetime.now().timestamp()
+        hits = _rate_state.get(bucket_key, [])
+        hits = [t for t in hits if now - t < window]
+        if len(hits) >= max_req:
+            return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
+        hits.append(now)
+        _rate_state[bucket_key] = hits
+
+    # CSRF for state-changing requests when using cookie auth
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        if request.cookies.get("access_token"):
+            origin = request.headers.get("origin")
+            referer = request.headers.get("referer")
+            if origin and origin not in _csrf_allowed:
+                return JSONResponse({"detail": "CSRF origin denied"}, status_code=403)
+            if not origin and referer:
+                if not any(referer.startswith(o) for o in _csrf_allowed):
+                    return JSONResponse({"detail": "CSRF referer denied"}, status_code=403)
+            csrf_cookie = request.cookies.get("csrf_token")
+            csrf_header = request.headers.get("x-csrf-token")
+            if not csrf_cookie or not csrf_header or csrf_cookie != csrf_header:
+                return JSONResponse({"detail": "CSRF token invalid"}, status_code=403)
+
+    return await call_next(request)
+
 # Include auth routes (prefix is /api/auth, set in auth_routes.py)
 app.include_router(auth_router)
 
@@ -151,6 +205,19 @@ app.include_router(auth_router)
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _audit_log(action: str, actor: str, target: Optional[str] = None, meta: Optional[Dict] = None) -> None:
+    try:
+        audit_logs_collection.insert_one({
+            "action": action,
+            "actor": actor,
+            "target": target,
+            "meta": meta or {},
+            "timestamp": now_utc(),
+        })
+    except Exception:
+        pass
 
 class NetworkScanRequest(BaseModel):
     network_range: str
@@ -489,6 +556,7 @@ async def create_user(user: UserCreateRequest, current_user: User = Depends(requ
     try:
         result = users_collection.insert_one(doc)
         doc["_id"] = result.inserted_id
+        _audit_log("user:create", current_user.username, target=username, meta={"role": doc["role"]})
         return {"user": _user_public(doc)}
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail="Username already exists")
@@ -546,6 +614,7 @@ async def update_user(
     try:
         users_collection.update_one({"_id": target["_id"]}, {"$set": update_doc})
         updated = users_collection.find_one({"_id": target["_id"]})
+        _audit_log("user:update", current_user.username, target=updated.get("username"))
         return {"user": _user_public(updated)}
     except Exception as e:
         logger.error(f"Error updating user: {e}")
@@ -588,6 +657,7 @@ async def update_allowlist(payload: ListUpdateRequest, current_user: User = Depe
             {"$set": {"items": items, "updated_at": now_utc()}},
             upsert=True,
         )
+        _audit_log("list:update", current_user.username, target="allowlist", meta={"count": len(items)})
         return {"allowlist": items}
     except Exception as e:
         logger.error(f"Error updating allowlist: {e}")
@@ -604,6 +674,7 @@ async def update_denylist(payload: ListUpdateRequest, current_user: User = Depen
             {"$set": {"items": items, "updated_at": now_utc()}},
             upsert=True,
         )
+        _audit_log("list:update", current_user.username, target="denylist", meta={"count": len(items)})
         return {"denylist": items}
     except Exception as e:
         logger.error(f"Error updating denylist: {e}")
@@ -662,6 +733,7 @@ async def upsert_baseline(
             {"$set": doc, "$setOnInsert": {"created_at": now_utc()}},
             upsert=True,
         )
+        _audit_log("baseline:upsert", current_user.username, target=seg, meta={"count": len(domains)})
         return {"baseline": doc}
     except Exception as e:
         logger.error(f"Error updating baseline: {e}")
@@ -914,7 +986,7 @@ async def list_reports(current_user: User = Depends(require_viewer)):
 @app.websocket("/api/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time scan/alert updates."""
-    token = websocket.query_params.get("token")
+    token = websocket.query_params.get("token") or websocket.cookies.get("access_token")
     if not token:
         await websocket.close(code=1008)
         return

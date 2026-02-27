@@ -76,6 +76,8 @@ mongosh shadow_ai_hunter < scripts/mongo-init.js
 MONGO_URL=mongodb://localhost:27017/shadow_ai_hunter
 SECRET_KEY=your-secret-key-here
 SCAN_NETWORK_RANGE=192.168.1.0/24
+COOKIE_SECURE=false  # set true in production (HTTPS)
+CSRF_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 
 # Frontend (.env)
 REACT_APP_BACKEND_URL=http://localhost:8001

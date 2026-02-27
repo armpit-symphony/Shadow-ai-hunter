@@ -1760,8 +1760,7 @@ function ScanPage() {
 
   useEffect(() => {
     const base = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
-    const token = localStorage.getItem('shadow_ai_token');
-    const wsUrl = `${base.replace(/^http/, 'ws')}/api/ws?token=${encodeURIComponent(token || '')}`;
+    const wsUrl = `${base.replace(/^http/, 'ws')}/api/ws`;
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => setWsConnected(true);

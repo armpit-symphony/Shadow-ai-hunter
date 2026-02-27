@@ -139,6 +139,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES=30
 SCAN_NETWORK_RANGE=192.168.1.0/24
 ENABLE_DEEP_SCAN=true
 SIEM_WEBHOOK_URL=https://your-siem.com/webhook
+COOKIE_SECURE=false  # set true in production (HTTPS)
+CSRF_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 ```
 
 **Frontend (.env)**

@@ -5,12 +5,14 @@ Authentication and Authorization for Shadow AI Hunter
 - MongoDB user lookup (injected at startup)
 """
 
+import hashlib
+import hmac
 import os
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional, List
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -20,12 +22,13 @@ from pydantic import BaseModel
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-jwt-secret-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # OAuth2 scheme - tokenUrl matches the actual route after router prefix
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
 # MongoDB collection injected at startup via init_db()
 _users_collection = None
@@ -73,6 +76,8 @@ class User(BaseModel):
 class UserInDB(User):
     """User with hashed password (never returned to clients)"""
     hashed_password: str
+    refresh_token_hash: Optional[str] = None
+    refresh_expires_at: Optional[datetime] = None
 
 
 # Role permissions
@@ -128,6 +133,46 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
+def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """Create a signed refresh JWT."""
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + (
+        expires_delta or timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    )
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def _token_hash(token: str) -> str:
+    return hmac.new(SECRET_KEY.encode(), token.encode(), hashlib.sha256).hexdigest()
+
+
+def store_refresh_token(username: str, refresh_token: str, expires_at: datetime) -> None:
+    """Store hashed refresh token for a user (single active token)."""
+    if _users_collection is None:
+        return
+    _users_collection.update_one(
+        {"username": username},
+        {"$set": {
+            "refresh_token_hash": _token_hash(refresh_token),
+            "refresh_expires_at": expires_at,
+        }},
+    )
+
+
+def clear_refresh_token(username: str) -> None:
+    """Clear refresh token fields for a user."""
+    if _users_collection is None:
+        return
+    _users_collection.update_one(
+        {"username": username},
+        {"$unset": {
+            "refresh_token_hash": "",
+            "refresh_expires_at": "",
+        }},
+    )
+
+
 def get_user(username: str) -> Optional[UserInDB]:
     """
     Look up a user in MongoDB.
@@ -145,16 +190,25 @@ def get_user(username: str) -> Optional[UserInDB]:
         role=UserRole(doc.get("role", "viewer")),
         disabled=doc.get("disabled", False),
         hashed_password=doc["hashed_password"],
+        refresh_token_hash=doc.get("refresh_token_hash"),
+        refresh_expires_at=doc.get("refresh_expires_at"),
     )
 
 
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
-    """Validate JWT and return the active user."""
+async def get_current_user(
+    request: Request,
+    token: Optional[str] = Depends(oauth2_scheme),
+) -> User:
+    """Validate JWT from Authorization header or HttpOnly cookie."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    if token is None:
+        token = request.cookies.get("access_token")
+    if not token:
+        raise credentials_exception
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")

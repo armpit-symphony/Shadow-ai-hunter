@@ -109,6 +109,14 @@ mongod --dbpath ./data
 - **Network**: Multiple network interface support
 - **GPU**: Optional CUDA support for ML acceleration
 
+## 🏷️ Release Workflow
+
+```bash
+cd /home/sparky/Shadow-ai-hunter
+awk 'BEGIN{p=0} /^## v2\\.0\\.1/{p=1} /^## v/{if(p && !/^## v2\\.0\\.1/) p=0} {if(p) print}' CHANGELOG.md > /tmp/release_notes.txt
+gh release create v2.0.1 -t "v2.0.1" -F /tmp/release_notes.txt
+```
+
 ## 🏗️ Architecture
 
 ```

@@ -292,6 +292,18 @@ def _configure_ttl_indexes() -> None:
         expireAfterSeconds=max(audit_ttl_days, 1) * 24 * 60 * 60,
     )
 
+
+def _siem_retry() -> "Retry":
+    from rq import Retry
+
+    max_retry = int(os.getenv("SIEM_RETRY_MAX", "3"))
+    intervals = os.getenv("SIEM_RETRY_INTERVALS", "10,30,60")
+    try:
+        interval_list = [int(x.strip()) for x in intervals.split(",") if x.strip()]
+    except Exception:
+        interval_list = [10, 30, 60]
+    return Retry(max=max_retry, interval=interval_list or [10, 30, 60])
+
 class NetworkScanRequest(BaseModel):
     network_range: str
     scan_type: str = "basic"
@@ -1136,7 +1148,7 @@ async def generate_report(
                         "report_id": report_data.get("report_id"),
                         "format": fmt,
                     },
-                    retry=Retry(max=3, interval=[10, 30, 60]),
+                    retry=_siem_retry(),
                     job_timeout=300,
                 )
             return {

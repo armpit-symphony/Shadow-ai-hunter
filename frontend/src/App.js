@@ -1743,6 +1743,8 @@ function AdminOpsPage() {
   const [siemDeliveries, setSiemDeliveries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState('');
+  const [siemFilter, setSiemFilter] = useState('all');
+  const [auditQuery, setAuditQuery] = useState('');
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
@@ -1762,6 +1764,20 @@ function AdminOpsPage() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
+  const filteredAudit = auditLogs.filter((l) => {
+    const q = auditQuery.trim().toLowerCase();
+    if (!q) return true;
+    return [
+      l.action,
+      l.actor,
+      l.target,
+    ].some((v) => (v || '').toLowerCase().includes(q));
+  });
+
+  const filteredSiem = siemDeliveries.filter((d) => (
+    siemFilter === 'all' ? true : d.status === siemFilter
+  ));
+
   return (
     <div>
       {toast && (
@@ -1771,21 +1787,39 @@ function AdminOpsPage() {
       )}
 
       <PageHeader title="Admin Ops" subtitle="Audit trail and SIEM delivery status">
-        <button onClick={loadAll}
-          className="flex items-center gap-2 px-3 py-2 text-xs text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">
-          <RefreshCw className="w-3 h-3" /> Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <input
+            value={auditQuery}
+            onChange={(e) => setAuditQuery(e.target.value)}
+            placeholder="Search audit logs…"
+            className="px-3 py-2 text-xs border border-gray-200 rounded-lg"
+          />
+          <select
+            value={siemFilter}
+            onChange={(e) => setSiemFilter(e.target.value)}
+            className="px-3 py-2 text-xs border border-gray-200 rounded-lg"
+          >
+            <option value="all">All SIEM</option>
+            <option value="queued">Queued</option>
+            <option value="delivered">Delivered</option>
+            <option value="failed">Failed</option>
+          </select>
+          <button onClick={loadAll}
+            className="flex items-center gap-2 px-3 py-2 text-xs text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">
+            <RefreshCw className="w-3 h-3" /> Refresh
+          </button>
+        </div>
       </PageHeader>
 
       {loading ? <Spinner /> : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <Card className="p-4">
             <h3 className="font-semibold text-gray-900 mb-3">Audit Logs</h3>
-            {auditLogs.length === 0 ? (
+            {filteredAudit.length === 0 ? (
               <EmptyState icon={Shield} title="No audit logs" subtitle="Admin actions will appear here." />
             ) : (
               <div className="space-y-3">
-                {auditLogs.map((l) => (
+                {filteredAudit.map((l) => (
                   <div key={l.id} className="text-xs text-gray-600 flex items-center gap-2">
                     <span className="font-mono text-gray-800">{(l.action || '').padEnd(16, ' ')}</span>
                     <span className="text-gray-500">by {l.actor}</span>
@@ -1801,11 +1835,11 @@ function AdminOpsPage() {
 
           <Card className="p-4">
             <h3 className="font-semibold text-gray-900 mb-3">SIEM Deliveries</h3>
-            {siemDeliveries.length === 0 ? (
+            {filteredSiem.length === 0 ? (
               <EmptyState icon={FileText} title="No SIEM deliveries" subtitle="Report exports will appear here." />
             ) : (
               <div className="space-y-3">
-                {siemDeliveries.map((d) => (
+                {filteredSiem.map((d) => (
                   <div key={d.id} className="text-xs text-gray-600 flex items-center gap-2">
                     <span className={`px-2 py-0.5 rounded-full text-xs ${
                       d.status === 'delivered' ? 'bg-green-100 text-green-700' :

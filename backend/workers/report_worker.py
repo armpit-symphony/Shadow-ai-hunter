@@ -9,6 +9,9 @@ Falls back to plain-text if fpdf2 is unavailable.
 import hashlib
 import json
 import logging
+import os
+import re
+import requests
 from datetime import datetime, timezone
 from typing import Dict, List
 
@@ -17,6 +20,67 @@ logger = logging.getLogger(__name__)
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _mask_ip(value: str) -> str:
+    if ":" in value:
+        parts = value.split(":")
+        return ":".join(parts[:-1] + ["xxxx"])
+    parts = value.split(".")
+    if len(parts) == 4:
+        return ".".join(parts[:3] + ["xxx"])
+    return value
+
+
+def _mask_email(value: str) -> str:
+    if "@" not in value:
+        return value
+    name, domain = value.split("@", 1)
+    if not name:
+        return "***@" + domain
+    return name[0] + "***@" + domain
+
+
+def _mask_user(value: str) -> str:
+    if not value:
+        return value
+    return value[0] + "***"
+
+
+def _mask_text(value: str) -> str:
+    if not isinstance(value, str):
+        return value
+    value = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", lambda m: _mask_ip(m.group(0)), value)
+    value = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", lambda m: _mask_email(m.group(0)), value)
+    return value
+
+
+def _mask_findings(findings: List[Dict]) -> List[Dict]:
+    masked = []
+    for f in findings:
+        nf = {}
+        for k, v in f.items():
+            if k in {"device_ip", "source", "dest_ip"} and isinstance(v, str):
+                nf[k] = _mask_ip(v)
+            elif k in {"user", "username"} and isinstance(v, str):
+                nf[k] = _mask_user(v)
+            elif k == "indicator" and isinstance(v, str):
+                nf[k] = _mask_text(v)
+            elif isinstance(v, str):
+                nf[k] = _mask_text(v)
+            else:
+                nf[k] = v
+        masked.append(nf)
+    return masked
+
+
+def _mask_report(report: Dict) -> Dict:
+    masked = dict(report)
+    masked["scan_details"] = {
+        k: _mask_text(str(v)) for k, v in report.get("scan_details", {}).items()
+    }
+    masked["findings"] = _mask_findings(report.get("findings", []))
+    return masked
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +184,8 @@ def generate_json_report(scan_id: str, scan_data: Dict, findings: List[Dict]) ->
         "compliance_summary": generate_compliance_summary(findings),
         "recommendations": generate_recommendations(findings),
     }
+    if os.getenv("REPORT_MASK_PII", "false").lower() == "true":
+        report = _mask_report(report)
     # Integrity hash (covers findings only — stable even if metadata changes)
     report["integrity_hash"] = hashlib.sha256(
         json.dumps(findings, sort_keys=True, default=str).encode()
@@ -337,3 +403,18 @@ def create_report(scan_id: str, scan_data: Dict, findings: List[Dict], format: s
         }
     else:
         raise ValueError(f"Unsupported report format: {format!r}. Use 'json' or 'pdf'.")
+
+
+def export_siem(report_payload: Dict) -> Dict:
+    """Send report payload to SIEM webhook with retries handled by RQ."""
+    url = os.getenv("SIEM_WEBHOOK_URL")
+    if not url:
+        return {"status": "skipped", "reason": "SIEM_WEBHOOK_URL not set"}
+    try:
+        resp = requests.post(url, json=report_payload, timeout=10)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"SIEM webhook failed: {resp.status_code}")
+        return {"status": "delivered"}
+    except Exception as e:
+        logger.error(f"SIEM export failed: {e}")
+        raise

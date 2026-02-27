@@ -23,6 +23,9 @@ SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-jwt-secret-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+SUPER_ADMIN_USERS = {
+    u.strip() for u in os.getenv("SUPER_ADMIN_USERS", "admin").split(",") if u.strip()
+}
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -171,6 +174,10 @@ def clear_refresh_token(username: str) -> None:
             "refresh_expires_at": "",
         }},
     )
+
+
+def is_super_admin(username: str) -> bool:
+    return username in SUPER_ADMIN_USERS
 
 
 def get_user(username: str) -> Optional[UserInDB]:

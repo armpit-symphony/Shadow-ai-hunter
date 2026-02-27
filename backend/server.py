@@ -22,6 +22,7 @@ from auth import (
     User, UserRole, require_admin, require_analyst, require_viewer,
     get_current_active_user, get_password_hash,
     init_db as auth_init_db,
+    is_super_admin,
 )
 from auth_routes import router as auth_router
 
@@ -657,6 +658,8 @@ async def create_user(user: UserCreateRequest, current_user: User = Depends(requ
         raise HTTPException(status_code=400, detail="Username is required")
     if len(user.password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if (user.role == UserRole.ADMIN) and not is_super_admin(current_user.username):
+        raise HTTPException(status_code=403, detail="Only super admins can create admin users")
 
     doc = {
         "username": username,
@@ -707,6 +710,10 @@ async def update_user(
             raise HTTPException(status_code=400, detail="You cannot disable your own account")
         if updates.role is not None and updates.role.value != target.get("role"):
             raise HTTPException(status_code=400, detail="You cannot change your own role")
+    if target.get("role") == "admin" and not is_super_admin(current_user.username):
+        raise HTTPException(status_code=403, detail="Only super admins can modify admin accounts")
+    if updates.role == UserRole.ADMIN and not is_super_admin(current_user.username):
+        raise HTTPException(status_code=403, detail="Only super admins can grant admin role")
 
     update_doc: Dict[str, Any] = {}
     if updates.email is not None:
@@ -1061,6 +1068,9 @@ async def generate_report(
         report_id = str(uuid4())
         try:
             from workers.report_worker import create_report
+            from workers.report_worker import export_siem
+            from rq import Retry
+            from workers.queue import report_queue
 
             report_data = create_report(scan_id, scan, findings, format=fmt)
             # Store report metadata
@@ -1072,6 +1082,17 @@ async def generate_report(
                 "generated_at": now_utc(),
                 "findings_count": len(findings),
             })
+            if os.getenv("SIEM_WEBHOOK_URL"):
+                report_queue.enqueue(
+                    export_siem,
+                    report_data.get("content") if fmt == "json" else {
+                        "scan_id": scan_id,
+                        "report_id": report_data.get("report_id"),
+                        "format": fmt,
+                    },
+                    retry=Retry(max=3, interval=[10, 30, 60]),
+                    job_timeout=300,
+                )
             return {
                 "report_id": report_id,
                 "scan_id": scan_id,

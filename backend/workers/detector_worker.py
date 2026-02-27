@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import redis
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -562,6 +563,22 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
                 "status": "completed",
                 "created_at": now_utc(),
             })
+        except Exception:
+            pass
+        try:
+            redis_url = os.getenv("REDIS_URL")
+            if redis_url:
+                r = redis.Redis.from_url(redis_url, decode_responses=True)
+                r.publish(
+                    "ws_events",
+                    json.dumps({
+                        "type": "detection_completed",
+                        "scan_id": scan_id,
+                        "findings_count": len(all_findings),
+                        "devices_with_findings": len(device_events),
+                        "status": "completed",
+                    }, default=str),
+                )
         except Exception:
             pass
         _client.close()

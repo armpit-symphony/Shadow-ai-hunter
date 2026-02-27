@@ -17,6 +17,7 @@ from bson import ObjectId
 
 # Import auth
 import auth as auth_module
+import redis.asyncio as redis_async
 from auth import (
     User, UserRole, require_admin, require_analyst, require_viewer,
     get_current_active_user, get_password_hash,
@@ -102,6 +103,7 @@ async def lifespan(app: FastAPI):
         baselines_collection.create_index("segment", unique=True)
         audit_logs_collection.create_index("timestamp")
         ws_events_collection.create_index("created_at")
+        _configure_ttl_indexes()
 
         # Inject MongoDB into auth module so get_user() can query it
         auth_init_db(users_collection)
@@ -255,6 +257,25 @@ def _scan_transition(scan_id: str, from_statuses: List[str], to_status: str, ext
     )
     return result.matched_count > 0
 
+
+def _configure_ttl_indexes() -> None:
+    events_ttl_days = int(os.getenv("EVENT_TTL_DAYS", "30"))
+    ws_ttl_hours = int(os.getenv("WS_EVENT_TTL_HOURS", "6"))
+    audit_ttl_days = int(os.getenv("AUDIT_TTL_DAYS", "365"))
+
+    events_collection.create_index(
+        "timestamp",
+        expireAfterSeconds=max(events_ttl_days, 1) * 24 * 60 * 60,
+    )
+    ws_events_collection.create_index(
+        "created_at",
+        expireAfterSeconds=max(ws_ttl_hours, 1) * 60 * 60,
+    )
+    audit_logs_collection.create_index(
+        "timestamp",
+        expireAfterSeconds=max(audit_ttl_days, 1) * 24 * 60 * 60,
+    )
+
 class NetworkScanRequest(BaseModel):
     network_range: str
     scan_type: str = "basic"
@@ -398,7 +419,21 @@ manager = ConnectionManager()
 
 
 async def _ws_event_pump():
-    """Poll ws_events collection and broadcast to active WebSocket clients."""
+    """Prefer Redis pub/sub for WS events; fall back to Mongo polling."""
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        try:
+            r = redis_async.from_url(redis_url, decode_responses=True)
+            pubsub = r.pubsub()
+            await pubsub.subscribe("ws_events")
+            while True:
+                msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if msg and msg.get("data"):
+                    await manager.broadcast(msg["data"])
+                await asyncio.sleep(0.01)
+        except Exception as e:
+            logger.error(f"Redis WS pump error, falling back to Mongo: {e}")
+
     last_id = None
     while True:
         def _fetch():
@@ -850,12 +885,15 @@ async def initiate_network_scan(
         try:
             from workers.queue import scan_queue
             from workers.scanner_worker import network_discovery_scan
+            from rq import Retry
 
             scan_queue.enqueue(
                 network_discovery_scan,
                 scan_request.network_range,
                 scan_id,
                 job_id=scan_id,
+                retry=Retry(max=3, interval=[10, 30, 60]),
+                job_timeout=900,
             )
             enqueued = True
             logger.info(f"[{scan_id}] Scan enqueued to RQ worker")
@@ -968,12 +1006,15 @@ async def import_telemetry(
         try:
             from workers.queue import detection_queue
             from workers.detector_worker import run_detection
+            from rq import Retry
 
             job = detection_queue.enqueue(
                 run_detection,
                 import_id,
                 import_request.entries,
                 job_id=f"detect-{import_id}",
+                retry=Retry(max=3, interval=[10, 30, 60]),
+                job_timeout=900,
             )
             detection_job_id = job.id
             scans_collection.update_one(

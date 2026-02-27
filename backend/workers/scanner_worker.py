@@ -17,11 +17,13 @@ Requires nmap to be installed on the host:  apt-get install nmap
 """
 
 import ipaddress
+import json
 import logging
 import os
 import socket
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Callable
+import redis
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +129,13 @@ def get_db():
 def _emit_ws_event(db, payload: Dict) -> None:
     try:
         db.ws_events.insert_one({**payload, "created_at": now_utc()})
+    except Exception:
+        pass
+    try:
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url:
+            r = redis.Redis.from_url(redis_url, decode_responses=True)
+            r.publish("ws_events", json.dumps(payload, default=str))
     except Exception:
         pass
 

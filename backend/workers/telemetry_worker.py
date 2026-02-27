@@ -5,6 +5,8 @@ Parses and normalizes DNS and Proxy/HTTP logs
 
 import logging
 import re
+import os
+import ipaddress
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 import json
@@ -133,12 +135,42 @@ def extract_domain(url: str) -> str:
     return url
 
 
+def infer_segment(ip: str) -> str:
+    """
+    Infer a network segment from source IP.
+    Uses SEGMENT_MAP env like: "corp:10.0.0.0/24;lab:10.0.1.0/24".
+    Falls back to /24 prefix of the IP.
+    """
+    if not ip:
+        return "default"
+    segment_map = os.getenv("SEGMENT_MAP", "")
+    if segment_map:
+        for entry in segment_map.split(";"):
+            if not entry.strip():
+                continue
+            name, _, cidr = entry.partition(":")
+            try:
+                if ipaddress.ip_address(ip) in ipaddress.ip_network(cidr.strip(), strict=False):
+                    return name.strip() or "default"
+            except Exception:
+                continue
+    try:
+        parts = ip.split(".")
+        if len(parts) >= 3:
+            return ".".join(parts[:3]) + ".0/24"
+    except Exception:
+        pass
+    return "default"
+
+
 def normalize_event(event: Dict) -> Dict:
     """Normalize event to standard schema"""
+    source_ip = event.get("source_ip", event.get("source", ""))
     normalized = {
         "id": event.get("id", ""),
         "ts": event.get("timestamp", now_utc().isoformat()),
-        "source": event.get("source_ip", event.get("source", "")),
+        "source": source_ip,
+        "segment": event.get("segment", infer_segment(source_ip)),
         "device_id": event.get("device_id", ""),
         "user": event.get("user", ""),
         "dest_domain": event.get("domain", event.get("dest_domain", "")),

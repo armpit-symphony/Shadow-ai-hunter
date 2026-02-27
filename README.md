@@ -141,6 +141,10 @@ ENABLE_DEEP_SCAN=true
 SIEM_WEBHOOK_URL=https://your-siem.com/webhook
 COOKIE_SECURE=false  # set true in production (HTTPS)
 CSRF_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+SEGMENT_MAP=corp:10.0.0.0/24;lab:10.0.1.0/24
+EVENT_TTL_DAYS=30
+WS_EVENT_TTL_HOURS=6
+AUDIT_TTL_DAYS=365
 ```
 
 **Frontend (.env)**

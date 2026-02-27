@@ -14,10 +14,14 @@ import json
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 # ---------------------------------------------------------------------------
 # Comprehensive AI service signature database
@@ -214,24 +218,98 @@ _DEFAULT_ALLOWLIST: List[str] = [
 ]
 
 
+def get_db():
+    """Get a direct MongoDB connection for use inside worker processes."""
+    mongo_url = os.getenv("MONGO_URL", "mongodb://localhost:27017/shadow_ai_hunter")
+    from pymongo import MongoClient
+
+    client = MongoClient(mongo_url, serverSelectionTimeoutMS=3000)
+    return client, client.shadow_ai_hunter
+
+
+def _domain_matches_list(domain: str, items: List[str]) -> bool:
+    for entry in items:
+        entry = entry.strip().lower()
+        if not entry:
+            continue
+        if entry.startswith("*."):
+            suffix = entry[2:]
+            if domain == suffix or domain.endswith(f".{suffix}"):
+                return True
+        else:
+            if domain == entry or domain.endswith(f".{entry}"):
+                return True
+    return False
+
+
+def _load_list_from_db(list_id: str) -> List[str]:
+    try:
+        client, db = get_db()
+        doc = db.lists.find_one({"_id": list_id})
+        client.close()
+        if doc and isinstance(doc.get("items"), list):
+            return [str(x).strip().lower() for x in doc["items"] if str(x).strip()]
+    except Exception:
+        return []
+    return []
+
+
+def _load_baselines_from_db() -> Dict[str, Dict]:
+    try:
+        client, db = get_db()
+        docs = list(db.baselines.find({}, {"_id": 0}))
+        client.close()
+        baseline_map = {}
+        for d in docs:
+            segment = d.get("segment")
+            if segment:
+                baseline_map[segment] = d
+        return baseline_map
+    except Exception:
+        return {}
+
+
+def _event_segment(event: Dict) -> str:
+    return (
+        event.get("segment")
+        or event.get("network_segment")
+        or event.get("network_range")
+        or "default"
+    )
+
 def load_allowlist() -> List[str]:
     """Load allowlisted domains from environment variable (comma-separated) or defaults."""
+    db_items = _load_list_from_db("allowlist")
     env_list = os.getenv("AI_DETECTION_ALLOWLIST", "")
     extra = [d.strip().lower() for d in env_list.split(",") if d.strip()]
-    return _DEFAULT_ALLOWLIST + extra
+    return list(dict.fromkeys(db_items + _DEFAULT_ALLOWLIST + extra))
+
+
+def load_denylist() -> List[str]:
+    """Load denylisted domains from DB or environment variable."""
+    db_items = _load_list_from_db("denylist")
+    env_list = os.getenv("AI_DETECTION_DENYLIST", "")
+    extra = [d.strip().lower() for d in env_list.split(",") if d.strip()]
+    return list(dict.fromkeys(db_items + extra))
 
 
 # ---------------------------------------------------------------------------
 # Detection logic
 # ---------------------------------------------------------------------------
 
-def detect_ai_services(event: Dict, allowlist: Optional[List[str]] = None) -> List[Dict]:
+def detect_ai_services(
+    event: Dict,
+    allowlist: Optional[List[str]] = None,
+    denylist: Optional[List[str]] = None,
+) -> List[Dict]:
     """
     Signature-based detection: check an event's domain/SNI/URL against the
     AI service signature database. Returns a list of finding dicts.
     """
     if allowlist is None:
         allowlist = load_allowlist()
+    if denylist is None:
+        denylist = load_denylist()
 
     findings = []
 
@@ -239,8 +317,20 @@ def detect_ai_services(event: Dict, allowlist: Optional[List[str]] = None) -> Li
         if not domain:
             return
         domain = domain.lower().strip()
-        # Allowlist check first
-        if any(domain == a or domain.endswith(f".{a}") for a in allowlist):
+        # Denylist check first (override allowlist)
+        if _domain_matches_list(domain, denylist):
+            findings.append({
+                "type": "denylist",
+                "indicator": domain,
+                "service": "Denylisted Domain",
+                "category": "denylist",
+                "severity": "critical",
+                "confidence": 1.0,
+                "details": "Domain is explicitly denylisted",
+            })
+            return
+        # Allowlist check
+        if _domain_matches_list(domain, allowlist):
             return
         sig = AI_SERVICE_SIGNATURES.get(domain)
         if sig:
@@ -362,7 +452,7 @@ def create_evidence_bundle(events: List[Dict], findings: List[Dict]) -> Dict:
         evidence_hash = "hash-error"
 
     return {
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": now_utc().isoformat(),
         "event_count": len(events),
         "finding_count": len(findings),
         "event_ids": [str(e.get("id", e.get("_id", "unknown"))) for e in events],
@@ -383,13 +473,16 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
     logger.info(f"[{scan_id}] Running detection on {len(events)} events")
 
     allowlist = load_allowlist()
+    denylist = load_denylist()
+    baselines = _load_baselines_from_db()
     all_findings: List[Dict] = []
     # Group events by source IP for per-device risk computation
     device_events: Dict[str, List[Dict]] = {}
 
     for event in events:
-        sig_findings = detect_ai_services(event, allowlist=allowlist)
-        heur_findings = heuristic_detection(event)
+        sig_findings = detect_ai_services(event, allowlist=allowlist, denylist=denylist)
+        baseline = baselines.get(_event_segment(event)) or baselines.get("default")
+        heur_findings = heuristic_detection(event, baseline=baseline)
         event_findings = sig_findings + heur_findings
         all_findings.extend(event_findings)
 
@@ -421,7 +514,7 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
                         "ip_address": src_ip,
                         "ai_risk_score": risk_score,
                         "ai_services_detected": ai_services,
-                        "last_detection": datetime.utcnow(),
+                        "last_detection": now_utc(),
                         "last_evidence": evidence,
                         "status": "active",
                     }
@@ -444,7 +537,7 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
                     "alert_type": "ai_detection",
                     "evidence": evidence,
                     "scan_id": scan_id,
-                    "created_at": datetime.utcnow(),
+                    "created_at": now_utc(),
                     "resolved": False,
                 }
                 _db.alerts.insert_one(alert)
@@ -454,12 +547,23 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
             {
                 "$set": {
                     "status": "completed",
-                    "completed_at": datetime.utcnow(),
+                    "completed_at": now_utc(),
                     "findings_count": len(all_findings),
                     "devices_with_findings": len(device_events),
                 }
             },
         )
+        try:
+            _db.ws_events.insert_one({
+                "type": "detection_completed",
+                "scan_id": scan_id,
+                "findings_count": len(all_findings),
+                "devices_with_findings": len(device_events),
+                "status": "completed",
+                "created_at": now_utc(),
+            })
+        except Exception:
+            pass
         _client.close()
     except Exception as e:
         logger.warning(f"[{scan_id}] Could not persist detection results: {e}")
@@ -472,7 +576,7 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
         "devices_with_findings": len(device_events),
         "risk_score": compute_risk_score(all_findings),
         "evidence": create_evidence_bundle(events, all_findings),
-        "completed_at": datetime.utcnow().isoformat(),
+        "completed_at": now_utc().isoformat(),
     }
 
     logger.info(

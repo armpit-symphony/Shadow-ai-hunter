@@ -29,11 +29,11 @@
 ## 🔧 Still To Do (V1 remaining / V2)
 
 ### V1
-- [ ] **User management API** — `POST /api/users`, `PATCH /api/users/{id}` (admin only)
-- [ ] **Allowlist/denylist management API** — UI to edit per-deployment signatures
-- [ ] **Baseline persistence** — store known AI domains per network segment for heuristics
-- [ ] **WebSocket progress updates** — push per-device scan progress to UI in real time
-- [ ] **Frontend login page** — connect to `/api/auth/login`; store + send JWT token
+- [x] **User management API** — `GET /api/users`, `POST /api/users`, `PATCH /api/users/{id}` (admin only)
+- [x] **Allowlist/denylist management API** — UI to edit per-deployment signatures
+- [x] **Baseline persistence** — store known AI domains per network segment for heuristics
+- [x] **WebSocket progress updates** — push per-device scan progress to UI in real time
+- [x] **Frontend login page** — connect to `/api/auth/login`; store + send JWT token
 
 ### V2+
 - [ ] LLM analysis agents (triage / remediation suggestions) — requires prompt injection guardrails

@@ -2,15 +2,17 @@ from fastapi import FastAPI, HTTPException, Depends, status, WebSocket, WebSocke
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
 from uuid import uuid4
+from bson import ObjectId
 
 # Import auth
 import auth as auth_module
@@ -38,6 +40,9 @@ alerts_collection = db.alerts
 users_collection = db.users
 events_collection = db.events
 reports_collection = db.reports
+lists_collection = db.lists
+baselines_collection = db.baselines
+ws_events_collection = db.ws_events
 
 # Security
 security = HTTPBearer()
@@ -60,7 +65,7 @@ def _seed_default_users() -> None:
             "role": "admin",
             "hashed_password": get_password_hash(admin_pass),
             "disabled": False,
-            "created_at": datetime.utcnow(),
+            "created_at": now_utc(),
         },
         {
             "username": "analyst",
@@ -69,7 +74,7 @@ def _seed_default_users() -> None:
             "role": "analyst",
             "hashed_password": get_password_hash(analyst_pass),
             "disabled": False,
-            "created_at": datetime.utcnow(),
+            "created_at": now_utc(),
         },
     ]
     try:
@@ -104,9 +109,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
 
+    # Start WebSocket event pump
+    app.state.ws_task = asyncio.create_task(_ws_event_pump())
+
     yield
 
     # Shutdown
+    try:
+        if getattr(app.state, "ws_task", None):
+            app.state.ws_task.cancel()
+    except Exception:
+        pass
     logger.info("Shutting down Shadow AI Hunter Backend...")
     client.close()
 
@@ -135,6 +148,9 @@ app.include_router(auth_router)
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 class NetworkScanRequest(BaseModel):
     network_range: str
@@ -186,6 +202,68 @@ class TelemetryImportRequest(BaseModel):
     entries: List[Dict]
 
 
+class UserCreateRequest(BaseModel):
+    username: str
+    password: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    role: UserRole = UserRole.VIEWER
+    disabled: bool = False
+
+
+class UserUpdateRequest(BaseModel):
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    role: Optional[UserRole] = None
+    disabled: Optional[bool] = None
+    password: Optional[str] = None
+
+
+class ListUpdateRequest(BaseModel):
+    items: List[str]
+
+
+class BaselineUpdateRequest(BaseModel):
+    known_ai_domains: List[str]
+
+
+def _user_public(doc: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": str(doc["_id"]),
+        "username": doc.get("username"),
+        "email": doc.get("email"),
+        "full_name": doc.get("full_name"),
+        "role": doc.get("role", "viewer"),
+        "disabled": doc.get("disabled", False),
+        "created_at": doc.get("created_at"),
+    }
+
+
+def _normalize_domains(items: List[str]) -> List[str]:
+    cleaned = []
+    for raw in items:
+        val = raw.strip().lower()
+        if not val:
+            continue
+        if val.startswith(".") or val.endswith(".") or ".." in val:
+            raise HTTPException(status_code=400, detail=f"Invalid domain: {raw}")
+        if not all(c.isalnum() or c in {".", "-", "*"} for c in val):
+            raise HTTPException(status_code=400, detail=f"Invalid domain: {raw}")
+        if val.count(".") < 1:
+            raise HTTPException(status_code=400, detail=f"Invalid domain: {raw}")
+        if "*" in val and not val.startswith("*."):
+            raise HTTPException(status_code=400, detail=f"Invalid wildcard: {raw}")
+        cleaned.append(val)
+    # de-dup while preserving order
+    seen = set()
+    result = []
+    for v in cleaned:
+        if v not in seen:
+            seen.add(v)
+            result.append(v)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # WebSocket connection manager
 # ---------------------------------------------------------------------------
@@ -216,13 +294,33 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+async def _ws_event_pump():
+    """Poll ws_events collection and broadcast to active WebSocket clients."""
+    last_id = None
+    while True:
+        def _fetch():
+            query = {"_id": {"$gt": last_id}} if last_id else {}
+            return list(ws_events_collection.find(query).sort("_id", 1).limit(100))
+
+        try:
+            events = await asyncio.to_thread(_fetch)
+            for ev in events:
+                last_id = ev.get("_id")
+                payload = {k: v for k, v in ev.items() if k != "_id"}
+                await manager.broadcast(json.dumps(payload, default=str))
+        except Exception as e:
+            logger.error(f"WS event pump error: {e}")
+
+        await asyncio.sleep(0.5)
+
+
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": datetime.utcnow()}
+    return {"status": "healthy", "timestamp": now_utc()}
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +410,7 @@ async def resolve_alert(alert_id: str, current_user: User = Depends(require_anal
                 q,
                 {"$set": {
                     "resolved": True,
-                    "resolved_at": datetime.utcnow(),
+                    "resolved_at": now_utc(),
                     "resolved_by": current_user.username,
                 }},
             )
@@ -345,7 +443,7 @@ async def get_policies(current_user: User = Depends(require_viewer)):
 async def create_policy(policy: PolicyRule, current_user: User = Depends(require_analyst)):
     """Create a new policy rule."""
     try:
-        policy.created_at = datetime.utcnow()
+        policy.created_at = now_utc()
         result = policies_collection.insert_one(policy.dict())
         if result.inserted_id:
             return {"message": "Policy created successfully", "id": str(result.inserted_id)}
@@ -353,6 +451,221 @@ async def create_policy(policy: PolicyRule, current_user: User = Depends(require
     except Exception as e:
         logger.error(f"Error creating policy: {e}")
         raise HTTPException(status_code=500, detail="Failed to create policy")
+
+
+# ---------------------------------------------------------------------------
+# Users (admin only)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/users")
+async def list_users(limit: int = 100, current_user: User = Depends(require_admin)):
+    """List users. Admin only."""
+    try:
+        users = list(users_collection.find({}).sort("created_at", -1).limit(limit))
+        return {"users": [_user_public(u) for u in users]}
+    except Exception as e:
+        logger.error(f"Error listing users: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list users")
+
+
+@app.post("/api/users")
+async def create_user(user: UserCreateRequest, current_user: User = Depends(require_admin)):
+    """Create a new user. Admin only."""
+    username = user.username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if len(user.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    doc = {
+        "username": username,
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": user.role.value if hasattr(user.role, "value") else user.role,
+        "disabled": bool(user.disabled),
+        "hashed_password": get_password_hash(user.password),
+        "created_at": now_utc(),
+    }
+    try:
+        result = users_collection.insert_one(doc)
+        doc["_id"] = result.inserted_id
+        return {"user": _user_public(doc)}
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Username already exists")
+    except Exception as e:
+        logger.error(f"Error creating user: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create user")
+
+
+@app.patch("/api/users/{user_id}")
+async def update_user(
+    user_id: str,
+    updates: UserUpdateRequest,
+    current_user: User = Depends(require_admin),
+):
+    """Update an existing user. Admin only."""
+    # Prevent admin from disabling or demoting themselves.
+    target = None
+    queries = []
+    try:
+        queries.append({"_id": ObjectId(user_id)})
+    except Exception:
+        pass
+    queries.append({"_id": user_id})
+
+    for q in queries:
+        target = users_collection.find_one(q)
+        if target:
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if target.get("username") == current_user.username:
+        if updates.disabled is True:
+            raise HTTPException(status_code=400, detail="You cannot disable your own account")
+        if updates.role is not None and updates.role.value != target.get("role"):
+            raise HTTPException(status_code=400, detail="You cannot change your own role")
+
+    update_doc: Dict[str, Any] = {}
+    if updates.email is not None:
+        update_doc["email"] = updates.email
+    if updates.full_name is not None:
+        update_doc["full_name"] = updates.full_name
+    if updates.role is not None:
+        update_doc["role"] = updates.role.value if hasattr(updates.role, "value") else updates.role
+    if updates.disabled is not None:
+        update_doc["disabled"] = bool(updates.disabled)
+    if updates.password is not None:
+        if len(updates.password) < 8:
+            raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+        update_doc["hashed_password"] = get_password_hash(updates.password)
+
+    if not update_doc:
+        raise HTTPException(status_code=400, detail="No updates provided")
+
+    try:
+        users_collection.update_one({"_id": target["_id"]}, {"$set": update_doc})
+        updated = users_collection.find_one({"_id": target["_id"]})
+        return {"user": _user_public(updated)}
+    except Exception as e:
+        logger.error(f"Error updating user: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update user")
+
+
+# ---------------------------------------------------------------------------
+# Allowlist / Denylist (admin only)
+# ---------------------------------------------------------------------------
+
+def _get_list_doc(list_id: str) -> Dict[str, Any]:
+    doc = lists_collection.find_one({"_id": list_id})
+    if not doc:
+        return {"_id": list_id, "items": []}
+    return doc
+
+
+@app.get("/api/lists")
+async def get_lists(current_user: User = Depends(require_admin)):
+    """Get current allowlist and denylist."""
+    try:
+        allow_doc = _get_list_doc("allowlist")
+        deny_doc = _get_list_doc("denylist")
+        return {
+            "allowlist": allow_doc.get("items", []),
+            "denylist": deny_doc.get("items", []),
+        }
+    except Exception as e:
+        logger.error(f"Error getting lists: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get lists")
+
+
+@app.put("/api/lists/allowlist")
+async def update_allowlist(payload: ListUpdateRequest, current_user: User = Depends(require_admin)):
+    """Replace the allowlist."""
+    items = _normalize_domains(payload.items)
+    try:
+        lists_collection.update_one(
+            {"_id": "allowlist"},
+            {"$set": {"items": items, "updated_at": now_utc()}},
+            upsert=True,
+        )
+        return {"allowlist": items}
+    except Exception as e:
+        logger.error(f"Error updating allowlist: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update allowlist")
+
+
+@app.put("/api/lists/denylist")
+async def update_denylist(payload: ListUpdateRequest, current_user: User = Depends(require_admin)):
+    """Replace the denylist."""
+    items = _normalize_domains(payload.items)
+    try:
+        lists_collection.update_one(
+            {"_id": "denylist"},
+            {"$set": {"items": items, "updated_at": now_utc()}},
+            upsert=True,
+        )
+        return {"denylist": items}
+    except Exception as e:
+        logger.error(f"Error updating denylist: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update denylist")
+
+
+# ---------------------------------------------------------------------------
+# Baselines
+# ---------------------------------------------------------------------------
+
+@app.get("/api/baselines")
+async def list_baselines(current_user: User = Depends(require_viewer)):
+    """List all baselines."""
+    try:
+        docs = list(baselines_collection.find({}, {"_id": 0}).sort("segment", 1))
+        return {"baselines": docs}
+    except Exception as e:
+        logger.error(f"Error listing baselines: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list baselines")
+
+
+@app.get("/api/baselines/{segment}")
+async def get_baseline(segment: str, current_user: User = Depends(require_viewer)):
+    """Get a baseline for a specific network segment."""
+    try:
+        doc = baselines_collection.find_one({"segment": segment}, {"_id": 0})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Baseline not found")
+        return {"baseline": doc}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting baseline: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get baseline")
+
+
+@app.put("/api/baselines/{segment}")
+async def upsert_baseline(
+    segment: str,
+    payload: BaselineUpdateRequest,
+    current_user: User = Depends(require_analyst),
+):
+    """Create or replace a baseline for a network segment."""
+    seg = segment.strip()
+    if not seg:
+        raise HTTPException(status_code=400, detail="Segment is required")
+    domains = _normalize_domains(payload.known_ai_domains)
+    doc = {
+        "segment": seg,
+        "known_ai_domains": domains,
+        "updated_at": now_utc(),
+    }
+    try:
+        baselines_collection.update_one(
+            {"segment": seg},
+            {"$set": doc, "$setOnInsert": {"created_at": now_utc()}},
+            upsert=True,
+        )
+        return {"baseline": doc}
+    except Exception as e:
+        logger.error(f"Error updating baseline: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update baseline")
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +686,7 @@ async def initiate_network_scan(
             "scan_type": scan_request.scan_type,
             "deep_scan": scan_request.deep_scan,
             "status": "queued",
-            "timestamp": datetime.utcnow(),
+            "timestamp": now_utc(),
             "devices_found": 0,
             "ai_services_detected": 0,
             "initiated_by": current_user.username,
@@ -438,7 +751,9 @@ async def _async_scan_fallback(scan_id: str, scan_request: NetworkScanRequest):
 async def get_scans(limit: int = 50, current_user: User = Depends(require_viewer)):
     """Get scan history."""
     try:
-        scans = list(scans_collection.find({}, {"_id": 0}).sort("timestamp", -1).limit(limit))
+        scans = list(scans_collection.find({}).sort("timestamp", -1).limit(limit))
+        for s in scans:
+            s["id"] = str(s.pop("_id"))
         return {"scans": scans}
     except Exception as e:
         logger.error(f"Error getting scans: {e}")
@@ -452,6 +767,7 @@ async def get_scan(scan_id: str, current_user: User = Depends(require_viewer)):
         scan = scans_collection.find_one({"_id": scan_id}, {"_id": 0})
         if not scan:
             raise HTTPException(status_code=404, detail="Scan not found")
+        scan["id"] = scan_id
         return {"scan": scan}
     except HTTPException:
         raise
@@ -489,7 +805,7 @@ async def import_telemetry(
             "_id": import_id,
             "log_type": import_request.log_type,
             "status": "processing",
-            "timestamp": datetime.utcnow(),
+            "timestamp": now_utc(),
             "entries_count": len(import_request.entries),
             "imported_by": current_user.username,
         }
@@ -516,7 +832,7 @@ async def import_telemetry(
             logger.warning(f"RQ unavailable for detection job: {e}")
             scans_collection.update_one(
                 {"_id": import_id},
-                {"$set": {"status": "completed", "completed_at": datetime.utcnow()}},
+                {"$set": {"status": "completed", "completed_at": now_utc()}},
             )
 
         return {
@@ -560,7 +876,7 @@ async def generate_report(
                 "scan_id": scan_id,
                 "format": fmt,
                 "generated_by": current_user.username,
-                "generated_at": datetime.utcnow(),
+                "generated_at": now_utc(),
                 "findings_count": len(findings),
             })
             return {
@@ -598,6 +914,25 @@ async def list_reports(current_user: User = Depends(require_viewer)):
 @app.websocket("/api/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time scan/alert updates."""
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008)
+        return
+    try:
+        payload = auth_module.jwt.decode(
+            token,
+            auth_module.SECRET_KEY,
+            algorithms=[auth_module.ALGORITHM],
+        )
+        username = payload.get("sub")
+        user = auth_module.get_user(username) if username else None
+        if not user or user.disabled:
+            await websocket.close(code=1008)
+            return
+    except Exception:
+        await websocket.close(code=1008)
+        return
+
     await manager.connect(websocket)
     try:
         while True:
@@ -630,7 +965,7 @@ async def populate_demo_data(current_user: User = Depends(require_admin)):
                     {"type": "telemetry_dns", "indicator": "api.openai.com", "severity": "high"},
                     {"type": "telemetry_dns", "indicator": "api.anthropic.com", "severity": "high"},
                 ],
-                "last_seen": datetime.utcnow(),
+                "last_seen": now_utc(),
                 "status": "active",
             },
             {
@@ -643,7 +978,7 @@ async def populate_demo_data(current_user: User = Depends(require_admin)):
                     {"type": "telemetry_proxy", "indicator": "copilot-proxy.githubusercontent.com",
                      "severity": "medium"},
                 ],
-                "last_seen": datetime.utcnow(),
+                "last_seen": now_utc(),
                 "status": "active",
             },
             {
@@ -658,7 +993,7 @@ async def populate_demo_data(current_user: User = Depends(require_admin)):
                     {"type": "open_ai_port", "port": 8888, "service": "Jupyter Notebook",
                      "severity": "medium"},
                 ],
-                "last_seen": datetime.utcnow(),
+                "last_seen": now_utc(),
                 "status": "active",
             },
         ]
@@ -672,7 +1007,7 @@ async def populate_demo_data(current_user: User = Depends(require_admin)):
                 "conditions": {"categories": ["llm"], "allowlist_bypass": False},
                 "actions": ["block_network", "send_alert", "log_activity"],
                 "enabled": True,
-                "created_at": datetime.utcnow(),
+                "created_at": now_utc(),
             },
             {
                 "name": "Monitor High-Risk Devices",
@@ -681,7 +1016,7 @@ async def populate_demo_data(current_user: User = Depends(require_admin)):
                 "conditions": {"ai_risk_score": {"$gte": 0.8}},
                 "actions": ["send_alert", "log_activity"],
                 "enabled": True,
-                "created_at": datetime.utcnow(),
+                "created_at": now_utc(),
             },
             {
                 "name": "Audit Local AI Services",
@@ -690,7 +1025,7 @@ async def populate_demo_data(current_user: User = Depends(require_admin)):
                 "conditions": {"open_ai_ports": True},
                 "actions": ["send_alert", "require_approval"],
                 "enabled": True,
-                "created_at": datetime.utcnow(),
+                "created_at": now_utc(),
             },
         ]
         policies_collection.insert_many(demo_policies)
@@ -708,7 +1043,7 @@ async def populate_demo_data(current_user: User = Depends(require_admin)):
                 "evidence": [
                     {"type": "telemetry_dns", "indicator": "api.openai.com", "confidence": 0.95},
                 ],
-                "created_at": datetime.utcnow(),
+                "created_at": now_utc(),
                 "resolved": False,
             },
             {
@@ -723,7 +1058,7 @@ async def populate_demo_data(current_user: User = Depends(require_admin)):
                 "evidence": [
                     {"type": "open_ai_port", "port": 8501, "severity": "high"},
                 ],
-                "created_at": datetime.utcnow() - timedelta(hours=2),
+                "created_at": now_utc() - timedelta(hours=2),
                 "resolved": False,
             },
         ]

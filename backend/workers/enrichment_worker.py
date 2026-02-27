@@ -11,10 +11,14 @@ Called after scanner_worker or detector_worker completes via the enrichment queu
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 # Asset criticality tiers (can be overridden per-deployment via DB)
 # Higher value = more sensitive system; affects final risk score weighting.
@@ -92,7 +96,7 @@ def evaluate_policies(device: Dict, ai_services: List[str], db=None) -> List[Dic
                     "policy_name": policy.get("name", ""),
                     "rule_type": policy.get("rule_type", ""),
                     "actions": policy.get("actions", []),
-                    "matched_at": datetime.utcnow().isoformat(),
+                    "matched_at": now_utc().isoformat(),
                 })
     except Exception as e:
         logger.warning(f"Policy evaluation error: {e}")
@@ -152,7 +156,7 @@ def enrich_device(scan_id: str, device_ip: str) -> Dict:
                     "asset_criticality": criticality,
                     "policy_matches": policy_matches,
                     "enforcement_actions": enforcement_actions,
-                    "enriched_at": datetime.utcnow(),
+                    "enriched_at": now_utc(),
                     "enrichment_scan_id": scan_id,
                 }
             },
@@ -174,7 +178,7 @@ def enrich_device(scan_id: str, device_ip: str) -> Dict:
                 "alert_type": "policy_violation",
                 "policy_matches": policy_matches,
                 "scan_id": scan_id,
-                "created_at": datetime.utcnow(),
+                "created_at": now_utc(),
                 "resolved": False,
             }
             _db.alerts.insert_one(alert)
@@ -229,5 +233,5 @@ def enrich_scan(scan_id: str) -> Dict:
         "status": "completed",
         "devices_enriched": completed,
         "total_devices": len(results),
-        "completed_at": datetime.utcnow().isoformat(),
+        "completed_at": now_utc().isoformat(),
     }

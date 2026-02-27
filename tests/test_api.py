@@ -51,7 +51,6 @@ def client(mock_db):
     """Build a TestClient with MongoDB patched out."""
     with (
         patch("pymongo.MongoClient") as mock_client_cls,
-        patch("auth.init_db"),
         patch("auth._users_collection", None),
     ):
         mock_mongo_client = MagicMock()

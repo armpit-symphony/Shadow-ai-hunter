@@ -20,10 +20,14 @@ import ipaddress
 import logging
 import os
 import socket
-from datetime import datetime
-from typing import Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Callable
 
 logger = logging.getLogger(__name__)
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 # ---------------------------------------------------------------------------
 # nmap availability check
@@ -120,6 +124,13 @@ def get_db():
     return client, client.shadow_ai_hunter
 
 
+def _emit_ws_event(db, payload: Dict) -> None:
+    try:
+        db.ws_events.insert_one({**payload, "created_at": now_utc()})
+    except Exception:
+        pass
+
+
 def probe_http_banner(ip: str, port: int, timeout: float = 2.0) -> Optional[str]:
     """
     Send a minimal HTTP HEAD request and read the first 1 KB of the response.
@@ -173,7 +184,11 @@ def _calculate_scan_risk(evidence: List[Dict]) -> float:
 # nmap scanning
 # ---------------------------------------------------------------------------
 
-def _nmap_scan(network_range: str, scan_id: str) -> List[Dict]:
+def _nmap_scan(
+    network_range: str,
+    scan_id: str,
+    progress_cb: Optional[Callable[[Dict], None]] = None,
+) -> List[Dict]:
     """Use python-nmap for host discovery + targeted port scanning."""
     nm = nmap.PortScanner()
     ai_port_list = ",".join(str(p) for p in sorted(LOCAL_AI_PORTS.keys()))
@@ -184,8 +199,15 @@ def _nmap_scan(network_range: str, scan_id: str) -> List[Dict]:
     nm.scan(hosts=network_range, arguments="-sn --max-retries 1 --host-timeout 5s")
     live_hosts = [h for h in nm.all_hosts() if nm[h].state() == "up"]
     logger.info(f"[{scan_id}] {len(live_hosts)} live hosts found")
+    if progress_cb:
+        progress_cb({
+            "type": "scan_hosts_discovered",
+            "scan_id": scan_id,
+            "hosts_total": len(live_hosts),
+        })
 
     devices: List[Dict] = []
+    scanned = 0
     for ip in live_hosts:
         try:
             nm.scan(
@@ -241,8 +263,17 @@ def _nmap_scan(network_range: str, scan_id: str) -> List[Dict]:
                     "ai_risk_score": _calculate_scan_risk(evidence),
                     "evidence": evidence,
                     "scan_id": scan_id,
-                    "last_seen": datetime.utcnow(),
+                    "last_seen": now_utc(),
                     "status": "active",
+                })
+            scanned += 1
+            if progress_cb:
+                progress_cb({
+                    "type": "scan_host_scanned",
+                    "scan_id": scan_id,
+                    "host": ip,
+                    "hosts_scanned": scanned,
+                    "hosts_total": len(live_hosts),
                 })
         except Exception as e:
             logger.warning(f"[{scan_id}] Error scanning {ip}: {e}")
@@ -254,7 +285,11 @@ def _nmap_scan(network_range: str, scan_id: str) -> List[Dict]:
 # TCP connect fallback scanning
 # ---------------------------------------------------------------------------
 
-def _socket_scan(network_range: str, scan_id: str) -> List[Dict]:
+def _socket_scan(
+    network_range: str,
+    scan_id: str,
+    progress_cb: Optional[Callable[[Dict], None]] = None,
+) -> List[Dict]:
     """TCP connect scan fallback when nmap is not available."""
     try:
         network = ipaddress.ip_network(network_range, strict=False)
@@ -266,6 +301,14 @@ def _socket_scan(network_range: str, scan_id: str) -> List[Dict]:
     logger.info(f"[{scan_id}] TCP connect fallback on {len(hosts)} hosts")
 
     devices: List[Dict] = []
+    scanned = 0
+    total = len(hosts)
+    if progress_cb:
+        progress_cb({
+            "type": "scan_hosts_discovered",
+            "scan_id": scan_id,
+            "hosts_total": total,
+        })
     for ip_obj in hosts:
         ip = str(ip_obj)
         open_ports: List[int] = []
@@ -310,8 +353,17 @@ def _socket_scan(network_range: str, scan_id: str) -> List[Dict]:
                 "ai_risk_score": _calculate_scan_risk(evidence),
                 "evidence": evidence,
                 "scan_id": scan_id,
-                "last_seen": datetime.utcnow(),
+                "last_seen": now_utc(),
                 "status": "active",
+            })
+        scanned += 1
+        if progress_cb:
+            progress_cb({
+                "type": "scan_host_scanned",
+                "scan_id": scan_id,
+                "host": ip,
+                "hosts_scanned": scanned,
+                "hosts_total": total,
             })
 
     return devices
@@ -340,17 +392,27 @@ def network_discovery_scan(network_range: str, scan_id: str) -> Dict:
         _client, _db = get_db()
         _db.scans.update_one(
             {"_id": scan_id},
-            {"$set": {"status": "running", "started_at": datetime.utcnow()}},
+            {"$set": {"status": "running", "started_at": now_utc()}},
         )
+        _emit_ws_event(_db, {
+            "type": "scan_started",
+            "scan_id": scan_id,
+            "network_range": network_range,
+            "status": "running",
+        })
     except Exception as e:
         logger.warning(f"[{scan_id}] Cannot connect to MongoDB at startup: {e}")
 
     # --- Perform the scan ---
+    def _progress(payload: Dict) -> None:
+        if _db is not None:
+            _emit_ws_event(_db, {**payload, "network_range": network_range})
+
     try:
         if NMAP_AVAILABLE:
-            devices = _nmap_scan(network_range, scan_id)
+            devices = _nmap_scan(network_range, scan_id, progress_cb=_progress)
         else:
-            devices = _socket_scan(network_range, scan_id)
+            devices = _socket_scan(network_range, scan_id, progress_cb=_progress)
     except Exception as e:
         logger.error(f"[{scan_id}] Scan execution failed: {e}")
         if _db is not None:
@@ -358,6 +420,13 @@ def network_discovery_scan(network_range: str, scan_id: str) -> Dict:
                 {"_id": scan_id},
                 {"$set": {"status": "failed", "error": str(e)}},
             )
+            _emit_ws_event(_db, {
+                "type": "scan_failed",
+                "scan_id": scan_id,
+                "network_range": network_range,
+                "status": "failed",
+                "error": str(e),
+            })
         if _client:
             _client.close()
         return {"scan_id": scan_id, "status": "failed", "error": str(e)}
@@ -365,12 +434,13 @@ def network_discovery_scan(network_range: str, scan_id: str) -> Dict:
     # --- Persist results ---
     ai_service_count = 0
     alerts_created = 0
+    processed_count = 0
 
     if _db is not None:
         for device in devices:
             try:
                 # Convert datetime for MongoDB
-                device_doc = {**device, "last_seen": datetime.utcnow()}
+                device_doc = {**device, "last_seen": now_utc()}
                 _db.devices.replace_one(
                     {"ip_address": device["ip_address"]},
                     device_doc,
@@ -397,11 +467,30 @@ def network_discovery_scan(network_range: str, scan_id: str) -> Dict:
                         "alert_type": "ai_service_discovered",
                         "evidence": device.get("evidence", []),
                         "scan_id": scan_id,
-                        "created_at": datetime.utcnow(),
+                        "created_at": now_utc(),
                         "resolved": False,
                     }
                     _db.alerts.insert_one(alert)
                     alerts_created += 1
+
+                processed_count += 1
+                _db.scans.update_one(
+                    {"_id": scan_id},
+                    {"$set": {
+                        "devices_found": processed_count,
+                        "ai_services_detected": ai_service_count,
+                        "alerts_created": alerts_created,
+                    }},
+                )
+                _emit_ws_event(_db, {
+                    "type": "scan_progress",
+                    "scan_id": scan_id,
+                    "device_ip": device["ip_address"],
+                    "devices_found": processed_count,
+                    "ai_services_detected": ai_service_count,
+                    "alerts_created": alerts_created,
+                    "status": "running",
+                })
             except Exception as e:
                 logger.error(
                     f"[{scan_id}] Error persisting device {device['ip_address']}: {e}"
@@ -412,7 +501,7 @@ def network_discovery_scan(network_range: str, scan_id: str) -> Dict:
             {
                 "$set": {
                     "status": "completed",
-                    "completed_at": datetime.utcnow(),
+                    "completed_at": now_utc(),
                     "devices_found": len(devices),
                     "ai_services_detected": ai_service_count,
                     "alerts_created": alerts_created,
@@ -420,6 +509,15 @@ def network_discovery_scan(network_range: str, scan_id: str) -> Dict:
                 }
             },
         )
+        _emit_ws_event(_db, {
+            "type": "scan_completed",
+            "scan_id": scan_id,
+            "network_range": network_range,
+            "devices_found": len(devices),
+            "ai_services_detected": ai_service_count,
+            "alerts_created": alerts_created,
+            "status": "completed",
+        })
 
     if _client:
         _client.close()
@@ -432,7 +530,7 @@ def network_discovery_scan(network_range: str, scan_id: str) -> Dict:
         "ai_services_detected": ai_service_count,
         "alerts_created": alerts_created,
         "nmap_used": NMAP_AVAILABLE,
-        "completed_at": datetime.utcnow().isoformat(),
+        "completed_at": now_utc().isoformat(),
     }
 
     logger.info(
@@ -454,5 +552,5 @@ def deep_scan(scan_id: str, target_ips: List[str]) -> Dict:
         "targets": target_ips,
         "status": "completed",
         "devices_found": all_devices,
-        "completed_at": datetime.utcnow().isoformat(),
+        "completed_at": now_utc().isoformat(),
     }

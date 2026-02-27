@@ -210,6 +210,19 @@ const NAV_ITEMS = [
 
 function ProtectedLayout() {
   const [page, setPage] = useState('dashboard');
+  const { user } = useAuth();
+  const adminNav = [
+    { id: 'lists',     label: 'Allow/Deny Lists', icon: FileText },
+    { id: 'users',     label: 'User Management',  icon: User },
+  ];
+  const analystNav = [
+    { id: 'baselines', label: 'Baselines',        icon: Terminal },
+  ];
+  const navItems = user?.role === 'admin'
+    ? [...NAV_ITEMS, ...analystNav, ...adminNav]
+    : user?.role === 'analyst'
+      ? [...NAV_ITEMS, ...analystNav]
+      : NAV_ITEMS;
 
   const renderPage = () => {
     switch (page) {
@@ -218,13 +231,16 @@ function ProtectedLayout() {
       case 'alerts':    return <AlertsPage />;
       case 'policies':  return <PoliciesPage />;
       case 'scan':      return <ScanPage />;
+      case 'baselines': return <BaselinesPage />;
+      case 'lists':     return <ListsPage />;
+      case 'users':     return <UsersPage />;
       default:          return <Dashboard />;
     }
   };
 
   return (
     <div className="min-h-screen bg-gray-50 flex">
-      <Sidebar page={page} setPage={setPage} />
+      <Sidebar page={page} setPage={setPage} navItems={navItems} />
       <main className="flex-1 ml-64 p-8 overflow-auto">
         {renderPage()}
       </main>
@@ -236,7 +252,7 @@ function ProtectedLayout() {
 // Sidebar
 // ─────────────────────────────────────────────────────────────────────────────
 
-function Sidebar({ page, setPage }) {
+function Sidebar({ page, setPage, navItems }) {
   const { user, logout } = useAuth();
 
   const roleBadgeColor = {
@@ -271,7 +287,7 @@ function Sidebar({ page, setPage }) {
 
       {/* Nav */}
       <nav className="flex-1 py-4 overflow-y-auto">
-        {NAV_ITEMS.map(({ id, label, icon: Icon }) => (
+        {navItems.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setPage(id)}
@@ -1223,6 +1239,499 @@ function PolicyRow({ policy }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Allowlist / Denylist Page
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ListsPage() {
+  const { api } = useAuth();
+  const [allowText, setAllowText] = useState('');
+  const [denyText, setDenyText] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState('');
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
+
+  useEffect(() => {
+    api.get('/api/lists')
+      .then((r) => {
+        setAllowText((r.data.allowlist || []).join('\n'));
+        setDenyText((r.data.denylist || []).join('\n'));
+      })
+      .catch(() => showToast('Failed to load lists.'))
+      .finally(() => setLoading(false));
+  }, [api]);
+
+  const parseLines = (text) =>
+    text.split('\n').map((l) => l.trim()).filter(Boolean);
+
+  const saveAllowlist = async () => {
+    try {
+      const items = parseLines(allowText);
+      await api.put('/api/lists/allowlist', { items });
+      showToast('Allowlist updated.');
+    } catch (e) {
+      const detail = e?.response?.data?.detail || 'Failed to update allowlist.';
+      showToast(detail);
+    }
+  };
+
+  const saveDenylist = async () => {
+    try {
+      const items = parseLines(denyText);
+      await api.put('/api/lists/denylist', { items });
+      showToast('Denylist updated.');
+    } catch (e) {
+      const detail = e?.response?.data?.detail || 'Failed to update denylist.';
+      showToast(detail);
+    }
+  };
+
+  return (
+    <div>
+      {toast && (
+        <div className="fixed top-4 right-4 z-50 bg-gray-900 text-white px-4 py-2 rounded-lg shadow-lg text-sm">
+          {toast}
+        </div>
+      )}
+
+      <PageHeader title="Allowlist & Denylist" subtitle="Control AI service signatures per deployment" />
+
+      {loading ? <Spinner /> : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <Card className="p-6">
+            <h3 className="font-semibold text-gray-900 mb-2">Allowlist</h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Domains here will be ignored by detection. One domain per line. Wildcards allowed: <code className="bg-gray-100 px-1 rounded">*.example.com</code>
+            </p>
+            <textarea
+              value={allowText}
+              onChange={(e) => setAllowText(e.target.value)}
+              rows={10}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono
+                focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <div className="flex justify-end mt-4">
+              <button
+                onClick={saveAllowlist}
+                className="px-4 py-2 text-sm font-medium text-white rounded-lg"
+                style={{ background: 'linear-gradient(135deg, #6366f1, #4f46e5)' }}
+              >
+                Save Allowlist
+              </button>
+            </div>
+          </Card>
+
+          <Card className="p-6">
+            <h3 className="font-semibold text-gray-900 mb-2">Denylist</h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Domains here always generate critical alerts. One domain per line.
+            </p>
+            <textarea
+              value={denyText}
+              onChange={(e) => setDenyText(e.target.value)}
+              rows={10}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono
+                focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <div className="flex justify-end mt-4">
+              <button
+                onClick={saveDenylist}
+                className="px-4 py-2 text-sm font-medium text-white rounded-lg"
+                style={{ background: 'linear-gradient(135deg, #ef4444, #dc2626)' }}
+              >
+                Save Denylist
+              </button>
+            </div>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Users Page (admin)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function UsersPage() {
+  const { api, user: currentUser } = useAuth();
+  const [users, setUsers] = useState([]);
+  const [edits, setEdits] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState('');
+  const [form, setForm] = useState({
+    username: '',
+    password: '',
+    email: '',
+    full_name: '',
+    role: 'viewer',
+    disabled: false,
+  });
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
+
+  const loadUsers = useCallback(() => {
+    setLoading(true);
+    api.get('/api/users')
+      .then((r) => setUsers(r.data.users || []))
+      .catch(() => showToast('Failed to load users.'))
+      .finally(() => setLoading(false));
+  }, [api]);
+
+  useEffect(() => {
+    loadUsers();
+  }, [loadUsers]);
+
+  useEffect(() => {
+    const next = {};
+    users.forEach((u) => {
+      next[u.id] = {
+        email: u.email || '',
+        full_name: u.full_name || '',
+        role: u.role || 'viewer',
+        disabled: !!u.disabled,
+        password: '',
+      };
+    });
+    setEdits(next);
+  }, [users]);
+
+  const handleCreate = async (e) => {
+    e.preventDefault();
+    if (!form.username.trim() || !form.password.trim()) {
+      showToast('Username and password are required.');
+      return;
+    }
+    try {
+      await api.post('/api/users', {
+        username: form.username.trim(),
+        password: form.password,
+        email: form.email || undefined,
+        full_name: form.full_name || undefined,
+        role: form.role,
+        disabled: form.disabled,
+      });
+      setForm({ username: '', password: '', email: '', full_name: '', role: 'viewer', disabled: false });
+      showToast('User created.');
+      loadUsers();
+    } catch (e2) {
+      const detail = e2?.response?.data?.detail || 'Failed to create user.';
+      showToast(detail);
+    }
+  };
+
+  const updateEdit = (id, patch) => {
+    setEdits((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+  };
+
+  const saveUser = async (u) => {
+    const edit = edits[u.id];
+    if (!edit) return;
+    const payload = {};
+    if (edit.email !== (u.email || '')) payload.email = edit.email;
+    if (edit.full_name !== (u.full_name || '')) payload.full_name = edit.full_name;
+    if (edit.role !== u.role) payload.role = edit.role;
+    if (edit.disabled !== !!u.disabled) payload.disabled = edit.disabled;
+    if (edit.password && edit.password.trim()) payload.password = edit.password.trim();
+    if (Object.keys(payload).length === 0) {
+      showToast('No changes to save.');
+      return;
+    }
+    try {
+      await api.patch(`/api/users/${u.id}`, payload);
+      showToast('User updated.');
+      loadUsers();
+    } catch (e) {
+      const detail = e?.response?.data?.detail || 'Failed to update user.';
+      showToast(detail);
+    }
+  };
+
+  return (
+    <div>
+      {toast && (
+        <div className="fixed top-4 right-4 z-50 bg-gray-900 text-white px-4 py-2 rounded-lg shadow-lg text-sm">
+          {toast}
+        </div>
+      )}
+
+      <PageHeader title="User Management" subtitle="Create and manage platform users" />
+
+      <Card className="p-6 mb-6">
+        <h3 className="font-semibold text-gray-900 mb-4">Create User</h3>
+        <form onSubmit={handleCreate} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Username *</label>
+            <input
+              value={form.username}
+              onChange={(e) => setForm({ ...form, username: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Password *</label>
+            <input
+              type="password"
+              value={form.password}
+              onChange={(e) => setForm({ ...form, password: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Full name</label>
+            <input
+              value={form.full_name}
+              onChange={(e) => setForm({ ...form, full_name: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+            <input
+              value={form.email}
+              onChange={(e) => setForm({ ...form, email: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+            <select
+              value={form.role}
+              onChange={(e) => setForm({ ...form, role: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+            >
+              {['admin', 'analyst', 'viewer', 'worker'].map((r) => (
+                <option key={r} value={r}>{r}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-2 mt-6">
+            <input
+              type="checkbox"
+              checked={form.disabled}
+              onChange={(e) => setForm({ ...form, disabled: e.target.checked })}
+            />
+            <span className="text-sm text-gray-600">Disabled</span>
+          </div>
+          <div className="md:col-span-2 flex justify-end">
+            <button
+              type="submit"
+              className="px-4 py-2 text-sm font-medium text-white rounded-lg"
+              style={{ background: 'linear-gradient(135deg, #6366f1, #4f46e5)' }}
+            >
+              Create User
+            </button>
+          </div>
+        </form>
+      </Card>
+
+      {loading ? <Spinner /> : (
+        <Card className="p-4">
+          {users.length === 0 ? (
+            <EmptyState icon={User} title="No users" subtitle="Create the first user above." />
+          ) : (
+            <div className="space-y-4">
+              {users.map((u) => {
+                const edit = edits[u.id] || {};
+                const isSelf = u.username === currentUser?.username;
+                return (
+                  <div key={u.id} className="grid grid-cols-1 md:grid-cols-6 gap-3 items-center">
+                    <div className="md:col-span-1">
+                      <p className="text-sm font-medium text-gray-900">{u.username}</p>
+                      <p className="text-xs text-gray-500">{u.id.slice(-6)}</p>
+                    </div>
+                    <input
+                      className="md:col-span-1 px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                      value={edit.full_name || ''}
+                      onChange={(e) => updateEdit(u.id, { full_name: e.target.value })}
+                      placeholder="Full name"
+                    />
+                    <input
+                      className="md:col-span-1 px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                      value={edit.email || ''}
+                      onChange={(e) => updateEdit(u.id, { email: e.target.value })}
+                      placeholder="Email"
+                    />
+                    <select
+                      className="md:col-span-1 px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                      value={edit.role || 'viewer'}
+                      onChange={(e) => updateEdit(u.id, { role: e.target.value })}
+                      disabled={isSelf}
+                    >
+                      {['admin', 'analyst', 'viewer', 'worker'].map((r) => (
+                        <option key={r} value={r}>{r}</option>
+                      ))}
+                    </select>
+                    <input
+                      className="md:col-span-1 px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                      value={edit.password || ''}
+                      onChange={(e) => updateEdit(u.id, { password: e.target.value })}
+                      placeholder="New password"
+                      type="password"
+                    />
+                    <div className="md:col-span-1 flex items-center gap-3 justify-end">
+                      <label className="flex items-center gap-2 text-sm text-gray-600">
+                        <input
+                          type="checkbox"
+                          checked={!!edit.disabled}
+                          onChange={(e) => updateEdit(u.id, { disabled: e.target.checked })}
+                          disabled={isSelf}
+                        />
+                        Disabled
+                      </label>
+                      <button
+                        onClick={() => saveUser(u)}
+                        className="px-3 py-2 text-xs font-medium text-white rounded-lg"
+                        style={{ background: 'linear-gradient(135deg, #6366f1, #4f46e5)' }}
+                      >
+                        Save
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Baselines Page (analyst/admin)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function BaselinesPage() {
+  const { api } = useAuth();
+  const [baselines, setBaselines] = useState([]);
+  const [segment, setSegment] = useState('default');
+  const [domainsText, setDomainsText] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState('');
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
+
+  const loadBaselines = useCallback(() => {
+    setLoading(true);
+    api.get('/api/baselines')
+      .then((r) => setBaselines(r.data.baselines || []))
+      .catch(() => showToast('Failed to load baselines.'))
+      .finally(() => setLoading(false));
+  }, [api]);
+
+  useEffect(() => {
+    loadBaselines();
+  }, [loadBaselines]);
+
+  const parseLines = (text) =>
+    text.split('\n').map((l) => l.trim()).filter(Boolean);
+
+  const saveBaseline = async (e) => {
+    e.preventDefault();
+    if (!segment.trim()) {
+      showToast('Segment is required.');
+      return;
+    }
+    try {
+      const items = parseLines(domainsText);
+      await api.put(`/api/baselines/${encodeURIComponent(segment.trim())}`, {
+        known_ai_domains: items,
+      });
+      showToast('Baseline saved.');
+      loadBaselines();
+    } catch (e2) {
+      const detail = e2?.response?.data?.detail || 'Failed to save baseline.';
+      showToast(detail);
+    }
+  };
+
+  const loadIntoForm = (b) => {
+    setSegment(b.segment || '');
+    setDomainsText((b.known_ai_domains || []).join('\n'));
+  };
+
+  return (
+    <div>
+      {toast && (
+        <div className="fixed top-4 right-4 z-50 bg-gray-900 text-white px-4 py-2 rounded-lg shadow-lg text-sm">
+          {toast}
+        </div>
+      )}
+
+      <PageHeader title="Baselines" subtitle="Known AI domains per network segment" />
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <Card className="lg:col-span-1 p-6">
+          <h3 className="font-semibold text-gray-900 mb-4">Create / Update Baseline</h3>
+          <form onSubmit={saveBaseline} className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Segment *</label>
+              <input
+                value={segment}
+                onChange={(e) => setSegment(e.target.value)}
+                placeholder="default or 10.0.0.0/24"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono"
+              />
+              <p className="text-xs text-gray-400 mt-1">Use a CIDR, VLAN name, or "default".</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Known AI Domains</label>
+              <textarea
+                value={domainsText}
+                onChange={(e) => setDomainsText(e.target.value)}
+                rows={10}
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono
+                  focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                className="px-4 py-2 text-sm font-medium text-white rounded-lg"
+                style={{ background: 'linear-gradient(135deg, #6366f1, #4f46e5)' }}
+              >
+                Save Baseline
+              </button>
+            </div>
+          </form>
+        </Card>
+
+        <div className="lg:col-span-2">
+          <h3 className="font-semibold text-gray-900 mb-3">Existing Baselines</h3>
+          {loading ? <Spinner /> : (
+            <Card className="p-4">
+              {baselines.length === 0 ? (
+                <EmptyState icon={Terminal} title="No baselines" subtitle="Add a baseline to reduce false positives." />
+              ) : (
+                <div className="space-y-3">
+                  {baselines.map((b) => (
+                    <div key={b.segment} className="flex items-center justify-between gap-4">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-gray-900">{b.segment}</p>
+                        <p className="text-xs text-gray-500">
+                          {(b.known_ai_domains || []).length} domains
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => loadIntoForm(b)}
+                        className="px-3 py-2 text-xs font-medium text-gray-700 border border-gray-200 rounded-lg hover:bg-gray-50"
+                      >
+                        Edit
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Scan Page
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1235,6 +1744,8 @@ function ScanPage() {
   const [scans, setScans] = useState([]);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState('');
+  const [wsConnected, setWsConnected] = useState(false);
+  const [liveEvents, setLiveEvents] = useState([]);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 4000); };
 
@@ -1246,6 +1757,49 @@ function ScanPage() {
   }, [api]);
 
   useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  useEffect(() => {
+    const base = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
+    const token = localStorage.getItem('shadow_ai_token');
+    const wsUrl = `${base.replace(/^http/, 'ws')}/api/ws?token=${encodeURIComponent(token || '')}`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => setWsConnected(true);
+    ws.onclose = () => setWsConnected(false);
+    ws.onerror = () => setWsConnected(false);
+    ws.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        if (!msg?.type || !msg?.scan_id) return;
+        setLiveEvents((prev) => [msg, ...prev].slice(0, 6));
+        if (msg.type.startsWith('scan_')) {
+          setScans((prev) => {
+            const idx = prev.findIndex((s) => s.id === msg.scan_id);
+            const next = [...prev];
+            const patch = {
+              id: msg.scan_id,
+              network_range: msg.network_range,
+              status: msg.status,
+              devices_found: msg.devices_found,
+              ai_services_detected: msg.ai_services_detected,
+              alerts_created: msg.alerts_created,
+              timestamp: new Date().toISOString(),
+            };
+            if (idx >= 0) {
+              next[idx] = { ...next[idx], ...patch };
+            } else {
+              next.unshift(patch);
+            }
+            return next;
+          });
+        }
+      } catch {
+        // ignore malformed events
+      }
+    };
+
+    return () => ws.close();
+  }, []);
 
   const startScan = async (e) => {
     e.preventDefault();
@@ -1378,6 +1932,39 @@ function ScanPage() {
             </button>
           </div>
 
+          <Card className="p-4 mb-4">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-medium text-gray-900">Live Progress</p>
+              <span className={`text-xs px-2 py-0.5 rounded-full ${
+                wsConnected ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
+              }`}>
+                {wsConnected ? 'WebSocket connected' : 'WebSocket offline'}
+              </span>
+            </div>
+            {liveEvents.length === 0 ? (
+              <p className="text-xs text-gray-500 mt-2">No live scan events yet.</p>
+            ) : (
+              <div className="mt-3 space-y-2">
+                {liveEvents.map((ev, idx) => (
+                  <div key={`${ev.scan_id}-${idx}`} className="text-xs text-gray-600 flex items-center gap-2">
+                    <span className="font-mono text-gray-800">{ev.scan_id.slice(0, 6)}…</span>
+                    <span className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-700">{ev.type.replace(/_/g, ' ')}</span>
+                    {ev.device_ip && <span className="text-gray-500">{ev.device_ip}</span>}
+                    {ev.host && <span className="text-gray-500">{ev.host}</span>}
+                    {ev.devices_found != null && (
+                      <span className="text-gray-500">{ev.devices_found} devices</span>
+                    )}
+                    {ev.hosts_scanned != null && ev.hosts_total != null && (
+                      <span className="text-gray-500">
+                        {ev.hosts_scanned}/{ev.hosts_total} hosts
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
           {loading ? <Spinner /> : (
             <div className="space-y-3">
               {scans.length === 0 ? (
@@ -1386,13 +1973,18 @@ function ScanPage() {
                 </Card>
               ) : (
                 scans.map((scan, i) => (
-                  <Card key={i} className="p-4">
+                  <Card key={scan.id || i} className="p-4">
                     <div className="flex items-start justify-between gap-4">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2 mb-1">
                           <code className="text-sm font-mono font-semibold text-gray-900">
                             {scan.network_range || 'N/A'}
                           </code>
+                          {scan.id && (
+                            <span className="text-xs text-gray-400 font-mono">
+                              {scan.id.slice(0, 6)}…
+                            </span>
+                          )}
                           <span className={`text-xs px-2 py-0.5 rounded-full font-medium
                             ${scanStatusColor[scan.status] || 'bg-gray-100 text-gray-700'}`}>
                             {scan.status}

@@ -46,9 +46,9 @@ curl -X GET "http://localhost:8001/api/demo/populate"
 ### Backend Setup
 ```bash
 cd backend
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+python3 -m venv ../.venv
+source ../.venv/bin/activate  # Windows: ..\.venv\Scripts\activate
+pip install -r requirements.txt -r ../requirements-dev.txt
 python server.py
 ```
 
@@ -96,6 +96,11 @@ sudo ./start.sh
 ```
 
 ## Troubleshooting
+
+### Python 3.12 Dependency Notes
+If you're on Python 3.12, use the project venv at `./.venv` and the pinned
+dependencies in `backend/requirements.txt`. These pins include compatible
+versions of `numpy` and `torch`.
 
 ### Port Conflicts
 If ports are already in use:

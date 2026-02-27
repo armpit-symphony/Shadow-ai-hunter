@@ -17,6 +17,12 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+filterwarnings = [
+  "ignore:The 'app' shortcut is now deprecated.*:DeprecationWarning",
+  "ignore:.*crypt.*is deprecated.*:DeprecationWarning",
+  "ignore:datetime\\.datetime\\.utcnow\\(\\) is deprecated.*:DeprecationWarning",
+  "ignore:datetime\\.datetime\\.utcfromtimestamp\\(\\) is deprecated.*:DeprecationWarning",
+]
 
 [tool.mypy]
 python_version = "3.11"

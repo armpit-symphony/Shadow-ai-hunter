@@ -76,7 +76,9 @@ open http://localhost
 ```bash
 # Backend setup
 cd backend
-pip install -r requirements.txt
+python3 -m venv ../.venv
+source ../.venv/bin/activate  # Windows: ..\.venv\Scripts\activate
+pip install -r requirements.txt -r ../requirements-dev.txt
 python server.py
 
 # Frontend setup (new terminal)
@@ -96,6 +98,7 @@ mongod --dbpath ./data
 - **Storage**: 20GB free space
 - **Network**: Administrative access for network scanning
 - **Python**: 3.11 or higher
+- **Python 3.12**: Supported via pinned deps in `backend/requirements.txt`
 - **Node.js**: 18 or higher
 - **MongoDB**: 5.0 or higher
 

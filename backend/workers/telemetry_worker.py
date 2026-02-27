@@ -5,11 +5,15 @@ Parses and normalizes DNS and Proxy/HTTP logs
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 import json
 
 logger = logging.getLogger(__name__)
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def parse_dns_log(line: str) -> Optional[Dict]:
@@ -88,7 +92,7 @@ def parse_proxy_log(line: str) -> Optional[Dict]:
                 "status_code": int(response_match.group(1)) if response_match else None,
                 "bytes_out": int(response_match.group(2)) if response_match else 0,
                 "user_agent": ua_match.group(2) if ua_match else None,
-                "timestamp": ts_match.group(1) if ts_match else datetime.utcnow().isoformat(),
+        "timestamp": ts_match.group(1) if ts_match else now_utc().isoformat(),
                 "dest_domain": extract_domain(url),
                 "raw": line
             }
@@ -112,7 +116,7 @@ def extract_timestamp(line: str) -> str:
         if match:
             return match.group(1)
     
-    return datetime.utcnow().isoformat()
+    return now_utc().isoformat()
 
 
 def extract_domain(url: str) -> str:
@@ -133,7 +137,7 @@ def normalize_event(event: Dict) -> Dict:
     """Normalize event to standard schema"""
     normalized = {
         "id": event.get("id", ""),
-        "ts": event.get("timestamp", datetime.utcnow().isoformat()),
+        "ts": event.get("timestamp", now_utc().isoformat()),
         "source": event.get("source_ip", event.get("source", "")),
         "device_id": event.get("device_id", ""),
         "user": event.get("user", ""),
@@ -203,7 +207,7 @@ def ingest_telemetry(scan_id: str, log_entries: List[Dict]) -> Dict:
         "status": "completed",
         "raw_entries": len(log_entries),
         "normalized_events": len(normalized_events),
-        "completed_at": datetime.utcnow().isoformat()
+        "completed_at": now_utc().isoformat()
     }
     
     logger.info(f"[{scan_id}] Telemetry ingestion completed: {len(normalized_events)} normalized events")

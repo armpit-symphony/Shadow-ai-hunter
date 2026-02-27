@@ -9,10 +9,14 @@ Falls back to plain-text if fpdf2 is unavailable.
 import hashlib
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List
 
 logger = logging.getLogger(__name__)
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -101,9 +105,9 @@ def generate_recommendations(findings: List[Dict]) -> List[str]:
 def generate_json_report(scan_id: str, scan_data: Dict, findings: List[Dict]) -> Dict:
     """Build a structured JSON report with integrity hash."""
     report: Dict = {
-        "report_id": f"rpt-{scan_id[:8]}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+        "report_id": f"rpt-{scan_id[:8]}-{now_utc().strftime('%Y%m%d%H%M%S')}",
         "scan_id": scan_id,
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": now_utc().isoformat(),
         "schema_version": "2.0",
         "summary": {
             "total_events": scan_data.get("events_processed", scan_data.get("devices_found", 0)),

@@ -948,7 +948,7 @@ async def initiate_network_scan(
         enqueued = False
         try:
             from workers.queue import scan_queue
-            from workers.scanner_worker import network_discovery_scan
+            from workers.target_scanner import network_discovery_scan
             from rq import Retry
 
             scan_queue.enqueue(
@@ -979,13 +979,13 @@ async def initiate_network_scan(
 async def _async_scan_fallback(scan_id: str, scan_request: NetworkScanRequest):
     """
     Async fallback when RQ worker is unavailable.
-    Runs the real scanner_worker function in a thread pool so it doesn't block.
+    Runs the real target_scanner function in a thread pool so it doesn't block.
     """
     import asyncio
 
     loop = asyncio.get_event_loop()
     try:
-        from workers.scanner_worker import network_discovery_scan
+        from workers.target_scanner import network_discovery_scan
 
         await loop.run_in_executor(
             None, network_discovery_scan, scan_request.network_range, scan_id
@@ -1069,7 +1069,7 @@ async def import_telemetry(
         detection_job_id = None
         try:
             from workers.queue import detection_queue
-            from workers.detector_worker import run_detection
+            from workers.ai_usage_detector import run_detection
             from rq import Retry
 
             job = detection_queue.enqueue(
@@ -1124,8 +1124,8 @@ async def generate_report(
 
         report_id = str(uuid4())
         try:
-            from workers.report_worker import create_report
-            from workers.report_worker import export_siem
+            from workers.report_engine import create_report
+            from workers.report_engine import export_siem
             from rq import Retry
             from workers.queue import report_queue
 

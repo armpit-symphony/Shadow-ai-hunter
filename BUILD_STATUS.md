@@ -11,12 +11,12 @@
 | Default user seeding | ✅ | `server.py` seeds admin/analyst on first run from env vars |
 | RQ worker queue | ✅ | `queue.py` defines 5 named queues (scans, detection, telemetry, enrichment, reports) |
 | Scan API → Queue | ✅ | `/api/scan` enqueues to RQ; async fallback when Redis unavailable |
-| Real network scanning | ✅ | `scanner_worker.py` uses nmap (with TCP-connect fallback); detects 20+ AI service ports |
-| AI domain signatures | ✅ | `detector_worker.py` — 100+ domains across llm / code_ai / image_gen / ml_infra / voice_ai |
+| Real network scanning | ✅ | `target_scanner.py` uses nmap (with TCP-connect fallback); detects 20+ AI service ports |
+| AI domain signatures | ✅ | `ai_usage_detector.py` — 100+ domains across llm / code_ai / image_gen / ml_infra / voice_ai |
 | Evidence bundles | ✅ | SHA-256 tamper-evident bundles attached to every alert |
 | Telemetry ingestion | ✅ | `/api/telemetry/import` — DNS + proxy log parsing, normalisation, detection job dispatch |
 | Enrichment worker | ✅ | `enrichment_worker.py` — policy evaluation, asset criticality, per-device risk re-weighting |
-| PDF reports | ✅ | `report_worker.py` — real PDF via fpdf2 with colour-coded risk table; text fallback |
+| PDF reports | ✅ | `report_engine.py` — real PDF via fpdf2 with colour-coded risk table; text fallback |
 | Reports API endpoint | ✅ | `POST /api/reports/generate`, `GET /api/reports` |
 | Worker container | ✅ | Separate `worker` service in docker-compose.yml with `NET_ADMIN`/`NET_RAW` caps |
 | TLS in nginx | ✅ | HTTPS-only; HTTP→HTTPS redirect; TLSv1.2/1.3; HSTS |

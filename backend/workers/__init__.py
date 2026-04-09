@@ -8,10 +8,10 @@ from workers.queue import (
     detection_queue,
     enrichment_queue,
     report_queue,
-    get_queue
+    get_queue,
 )
 
-from workers.scanner_worker import network_discovery_scan, deep_scan
-from workers.detector_worker import run_detection, detect_ai_services
+from workers.target_scanner import network_discovery_scan, deep_scan
+from workers.ai_usage_detector import run_detection, detect_ai_services
 from workers.telemetry_worker import ingest_telemetry, process_log_file
-from workers.report_worker import create_report
+from workers.report_engine import create_report, export_siem

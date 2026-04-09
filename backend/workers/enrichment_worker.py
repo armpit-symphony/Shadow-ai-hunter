@@ -6,7 +6,7 @@ Cross-references scanner/detection findings with:
   - Asset criticality lookup (is this a high-value system?)
   - Deduplication (merge multiple scan results for the same IP)
 
-Called after scanner_worker or detector_worker completes via the enrichment queue.
+Called after target_scanner or ai_usage_detector completes via the enrichment queue.
 """
 
 import logging

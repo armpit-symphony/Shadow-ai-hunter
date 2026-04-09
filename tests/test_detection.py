@@ -1,5 +1,5 @@
 """
-Unit tests for backend/workers/detector_worker.py
+Unit tests for backend/workers/ai_usage_detector.py
 
 Run with:  cd backend && pytest ../tests/test_detection.py -v
 """
@@ -7,13 +7,13 @@ Run with:  cd backend && pytest ../tests/test_detection.py -v
 import sys
 import os
 
-# Ensure backend/ is on the path so detector_worker can be imported
+# Ensure backend/ is on the path so ai_usage_detector can be imported
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend", "workers"))
 
 import pytest
 
-from detector_worker import (
+from ai_usage_detector import (
     AI_SERVICE_SIGNATURES,
     detect_ai_services,
     detect_ai_user_agents,

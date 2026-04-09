@@ -174,8 +174,53 @@ def generate_recommendations(findings: List[Dict]) -> List[str]:
 # JSON report
 # ---------------------------------------------------------------------------
 
+def _remediation_for_finding(finding: Dict) -> str:
+    """Return remediation text for a given finding."""
+    ftype = finding.get("type", "")
+    sev = finding.get("severity", "low")
+    indicator = finding.get("indicator", "")
+    if "domain" in ftype or "sni" in ftype:
+        return (
+            f"Block or monitor unauthorized AI domain '{indicator}' at the DNS resolver "
+            "or secure web gateway. Update the organization's AI usage policy."
+        )
+    if "port" in ftype:
+        return (
+            f"Investigate device {indicator} for locally-running AI services. "
+            "Register the workload with IT or initiate a security review."
+        )
+    if "volume" in ftype or "high_volume" in ftype:
+        return (
+            f"Investigate high-volume data transfer to AI endpoint '{indicator}'. "
+            "Update DLP policies to restrict sensitive data uploads to AI services."
+        )
+    if "user_agent" in ftype:
+        return (
+            f"Review client software on {indicator} — unauthorized AI tool detected via user-agent. "
+            "Update acceptable-use policy and enforce via endpoint controls."
+        )
+    if sev == "critical":
+        return f"CRITICAL severity finding on '{indicator}': escalate to security team immediately."
+    return f"Review and determine appropriate mitigation for '{indicator}'."
+
+
 def generate_json_report(scan_id: str, scan_data: Dict, findings: List[Dict]) -> Dict:
     """Build a structured JSON report with integrity hash."""
+    # Attach remediation and structured evidence to each finding
+    enriched_findings = []
+    for f in findings:
+        ef = dict(f)
+        ef["evidence"] = {
+            "indicator": f.get("indicator", ""),
+            "source_ip": f.get("source_ip", ""),
+            "dest_ip": f.get("dest_ip", ""),
+            "timestamp": f.get("timestamp", ""),
+            "confidence": f.get("confidence", 0),
+            "raw_ref": f.get("raw_ref", ""),
+        }
+        ef["remediation"] = _remediation_for_finding(f)
+        enriched_findings.append(ef)
+
     report: Dict = {
         "report_id": f"rpt-{scan_id[:8]}-{now_utc().strftime('%Y%m%d%H%M%S')}",
         "scan_id": scan_id,
@@ -183,20 +228,20 @@ def generate_json_report(scan_id: str, scan_data: Dict, findings: List[Dict]) ->
         "schema_version": "2.0",
         "summary": {
             "total_events": scan_data.get("events_processed", scan_data.get("devices_found", 0)),
-            "findings_count": len(findings),
-            "risk_level": calculate_risk_level(findings),
+            "findings_count": len(enriched_findings),
+            "risk_level": calculate_risk_level(enriched_findings),
             "devices_with_findings": scan_data.get("devices_with_findings", 0),
         },
         "scan_details": {k: str(v) for k, v in scan_data.items() if k != "_id"},
-        "findings": findings,
-        "compliance_summary": generate_compliance_summary(findings),
-        "recommendations": generate_recommendations(findings),
+        "findings": enriched_findings,
+        "compliance_summary": generate_compliance_summary(enriched_findings),
+        "recommendations": generate_recommendations(enriched_findings),
     }
     if os.getenv("REPORT_MASK_PII", "false").lower() == "true":
         report = _mask_report(report)
     # Integrity hash (covers findings only — stable even if metadata changes)
     report["integrity_hash"] = hashlib.sha256(
-        json.dumps(findings, sort_keys=True, default=str).encode()
+        json.dumps(enriched_findings, sort_keys=True, default=str).encode()
     ).hexdigest()
     return report
 

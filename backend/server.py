@@ -1272,6 +1272,28 @@ async def list_reports(current_user: User = Depends(require_viewer)):
         raise HTTPException(status_code=500, detail="Failed to list reports")
 
 
+@app.get("/api/reports/{report_id}")
+async def get_report(
+    report_id: str,
+    current_user: User = Depends(require_viewer),
+):
+    """
+    Fetch a specific report by ID.
+    Returns structured JSON findings, severity levels, evidence,
+    and remediation text.
+    """
+    try:
+        doc = reports_collection.find_one({"_id": report_id}, {"_id": 0})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Report not found")
+        return doc
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching report {report_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch report")
+
+
 # ---------------------------------------------------------------------------
 # WebSocket
 # ---------------------------------------------------------------------------

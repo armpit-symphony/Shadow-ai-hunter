@@ -5,32 +5,43 @@ services:
     image: mongo:7.0
     container_name: shadow_ai_mongo
     restart: unless-stopped
+    # Port 27017 exposed for local dev only.
+    # In production, remove 'ports' — backend connects via shadow_ai_network.
     ports:
       - "27017:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-changeme}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?MONGO_PASSWORD must be set}
       MONGO_INITDB_DATABASE: shadow_ai_hunter
     volumes:
       - mongodb_data:/data/db
       - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
     networks:
       - shadow_ai_network
-    # Security: MongoDB is not exposed externally in production;
-    # remove the 'ports' block and use internal networking only.
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   redis:
     image: redis:7-alpine
     container_name: shadow_ai_redis
     restart: unless-stopped
-    # Redis is internal only; remove 'ports' in production.
+    # Redis internal only — no ports exposed.
+    # In production, remove 'ports' entirely.
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     networks:
       - shadow_ai_network
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   backend:
     build:
@@ -41,53 +52,78 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - MONGO_URL=${MONGO_URL:-mongodb://admin:changeme@mongodb:27017/shadow_ai_hunter?authSource=admin}
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set — no default}
-      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set — no default}
-      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-changeme-admin}
-      - DEFAULT_ANALYST_PASSWORD=${DEFAULT_ANALYST_PASSWORD:-changeme-analyst}
+      - MONGO_URL=${MONGO_URL:-mongodb://admin:${MONGO_PASSWORD}@mongodb:27017/shadow_ai_hunter?authSource=admin}
+      - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:?DEFAULT_ADMIN_PASSWORD must be set}
+      - DEFAULT_ANALYST_PASSWORD=${DEFAULT_ANALYST_PASSWORD:?DEFAULT_ANALYST_PASSWORD must be set}
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
     depends_on:
-      - mongodb
-      - redis
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ./backend:/app
     networks:
       - shadow_ai_network
-    # SECURITY: Do NOT run privileged in production.
-    # If you need nmap scanning, use the worker service (has NET_RAW/NET_ADMIN caps).
-    # privileged: true  # REMOVED — security risk
+    # NET_ADMIN/NET_RAW removed from backend — isolated scanner-worker has these.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  worker:
+  worker_scanner:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: shadow_ai_worker
+    container_name: shadow_ai_worker_scanner
     restart: unless-stopped
-    # Run the RQ worker listening on all defined queues
     command: >
-      rq worker
-      scans detection telemetry enrichment reports
-      --url redis://redis:6379/0
+      rq worker scans --url redis://:${REDIS_PASSWORD}@redis:6379/0
       --log-format "%(asctime)s %(levelname)s %(message)s"
     environment:
-      - MONGO_URL=${MONGO_URL:-mongodb://admin:changeme@mongodb:27017/shadow_ai_hunter?authSource=admin}
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - MONGO_URL=${MONGO_URL:-mongodb://admin:${MONGO_PASSWORD}@mongodb:27017/shadow_ai_hunter?authSource=admin}
+      - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
       - SCAN_MAX_HOSTS=${SCAN_MAX_HOSTS:-254}
     depends_on:
-      - mongodb
-      - redis
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
     volumes:
       - ./backend:/app
     networks:
       - shadow_ai_network
-    # Network capabilities required for nmap / tcpdump scanning.
-    # These are far safer than 'privileged: true'.
     cap_add:
-      - NET_ADMIN
       - NET_RAW
-    # No public ports — workers communicate only via Redis queue.
+    # NET_ADMIN removed — NET_RAW is sufficient for port scanning.
+
+  worker_detector:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: shadow_ai_worker_detector
+    restart: unless-stopped
+    command: >
+      rq worker detection enrichment reports
+      --url redis://:${REDIS_PASSWORD}@redis:6379/0
+      --log-format "%(asctime)s %(levelname)s %(message)s"
+    environment:
+      - MONGO_URL=${MONGO_URL:-mongodb://admin:${MONGO_PASSWORD}@mongodb:27017/shadow_ai_hunter?authSource=admin}
+      - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    networks:
+      - shadow_ai_network
+    # No NET_ADMIN/NET_RAW — detection/enrichment/reporting don't need packet capabilities.
 
   frontend:
     build:
@@ -98,7 +134,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - REACT_APP_BACKEND_URL=http://localhost:8001
+      - REACT_APP_BACKEND_URL=http://backend:8001
       - GENERATE_SOURCEMAP=false
     depends_on:
       - backend
@@ -107,6 +143,11 @@ services:
       - ./frontend/public:/app/public
     networks:
       - shadow_ai_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   nginx:
     image: nginx:alpine

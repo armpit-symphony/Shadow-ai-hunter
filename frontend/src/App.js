@@ -206,7 +206,7 @@ const NAV_ITEMS = [
   { id: 'devices',    label: 'Devices',        icon: Network },
   { id: 'alerts',     label: 'Alerts',         icon: AlertTriangle },
   { id: 'policies',   label: 'Policies',       icon: Lock },
-  { id: 'scan',       label: 'Network Scan',   icon: Search },
+  { id: 'scan',       label: 'Audit',          icon: Search },
 ];
 
 function ProtectedLayout() {
@@ -448,6 +448,7 @@ function Dashboard() {
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
+  const [quickTarget, setQuickTarget] = useState('');
   const [toast, setToast] = useState('');
 
   const showToast = (msg) => {
@@ -475,18 +476,19 @@ function Dashboard() {
 
   useEffect(() => { load(); }, [load]);
 
-  const startScan = async () => {
+  const startScan = async (overrideTarget) => {
+    const target = overrideTarget || quickTarget || '192.168.1.0/24';
     setScanning(true);
     try {
       await api.post('/api/scan', {
-        network_range: '192.168.1.0/24',
+        network_range: target,
         scan_type: 'comprehensive',
         deep_scan: true,
       });
-      showToast('Scan queued — results will appear shortly.');
+      showToast('Audit queued — results will appear shortly.');
       setTimeout(load, 5000);
     } catch {
-      showToast('Scan failed. Check that the worker is running.');
+      showToast('Audit failed. Check that the worker is running.');
     } finally {
       setScanning(false);
     }
@@ -521,20 +523,68 @@ function Dashboard() {
         </div>
       )}
 
-      <PageHeader title="Dashboard" subtitle="Enterprise AI Detection & Network Security">
+      <PageHeader title="Dashboard" subtitle="AI Risk Auditing Platform">
         <button onClick={populateDemo}
           className="px-4 py-2 text-sm font-medium text-green-700 bg-green-50 border border-green-200
             rounded-lg hover:bg-green-100 transition-colors">
-          Load Demo Data
+          Seed Demo Data
         </button>
         <button onClick={startScan} disabled={scanning}
           className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg
             transition-all disabled:opacity-60"
           style={{ background: 'linear-gradient(135deg, #6366f1, #4f46e5)' }}>
           {scanning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-          {scanning ? 'Scanning…' : 'Start Scan'}
+          {scanning ? 'Auditing…' : 'Quick Audit'}
         </button>
       </PageHeader>
+
+      {/* Quick Audit — hero input */}
+      <div className="rounded-2xl p-6 text-white"
+        style={{ background: 'linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #1e3a5f 100%)' }}>
+        <div className="max-w-2xl mx-auto text-center">
+          <h2 className="text-xl font-bold mb-1">Quick Audit</h2>
+          <p className="text-indigo-200 text-sm mb-5">Enter a URL or repository to auto-detect AI services and surface risk findings instantly.</p>
+          <form onSubmit={async (e) => {
+            e.preventDefault();
+            if (!quickTarget.trim()) return;
+            setScanning(true);
+            try {
+              const target = quickTarget.trim();
+              const isRepo = target.includes('github.com') || target.includes('gitlab.com');
+              const r = await smartCreateScan({
+                target_type: isRepo ? 'repo' : 'url',
+                target_value: target,
+                modules_enabled: ['target_scanner', 'ai_usage_detector'],
+                job_name: `Quick Audit: ${target.slice(0, 60)}`,
+              });
+              const id = r.job_id || r.scan_id;
+              setQuickTarget('');
+              showToast(`Audit queued (${id?.slice(0, 8)}…) — results will appear in Audit History.`);
+              setTimeout(load, 4000);
+            } catch (err) {
+              showToast(err?.response?.data?.detail || 'Audit failed. Check that the worker is running.');
+            } finally {
+              setScanning(false);
+            }
+          }}
+            className="flex gap-3 max-w-xl mx-auto">
+            <input
+              type="text"
+              value={quickTarget}
+              onChange={(e) => setQuickTarget(e.target.value)}
+              placeholder="https://github.com/user/repo  or  https://api.example.com"
+              className="flex-1 px-4 py-3 rounded-xl text-gray-900 text-sm font-mono placeholder-gray-400
+                focus:outline-none focus:ring-2 focus:ring-indigo-300"
+            />
+            <button type="submit"
+              className="px-6 py-3 bg-white text-indigo-700 font-semibold text-sm rounded-xl
+                hover:bg-indigo-50 transition-colors flex items-center gap-2 whitespace-nowrap">
+              <Zap className="w-4 h-4" /> Run Audit
+            </button>
+          </form>
+          <p className="text-indigo-300 text-xs mt-3">Auto-selects modules · Runs full AI service detection · Ready in minutes</p>
+        </div>
+      </div>
 
       {/* Stat cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1974,13 +2024,13 @@ function ScanPage() {
         </div>
       )}
 
-      <PageHeader title="Network Scan" subtitle="Discover devices running local AI services" />
+      <PageHeader title="Audit" subtitle="Discover, assess, and report on AI service risks across your network" />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Scan form */}
         <Card className="lg:col-span-1 p-6">
           <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <Wifi className="w-4 h-4 text-indigo-500" /> Scan Configuration
+            <Wifi className="w-4 h-4 text-indigo-500" /> Audit Configuration
           </h3>
           <form onSubmit={startScan} className="space-y-4">
             <div>
@@ -2044,8 +2094,8 @@ function ScanPage() {
               style={{ background: 'linear-gradient(135deg, #6366f1, #4f46e5)' }}
             >
               {scanning
-                ? <><RefreshCw className="w-4 h-4 animate-spin" /> Queuing scan…</>
-                : <><Search className="w-4 h-4" /> Start Scan</>}
+                ? <><RefreshCw className="w-4 h-4 animate-spin" /> Running audit…</>
+                : <><Search className="w-4 h-4" /> Run Audit</>}
             </button>
           </form>
 
@@ -2062,7 +2112,7 @@ function ScanPage() {
         <div className="lg:col-span-2">
           <div className="flex items-center justify-between mb-4">
             <h3 className="font-semibold text-gray-900 flex items-center gap-2">
-              <Clock className="w-4 h-4 text-gray-400" /> Scan History
+              <Clock className="w-4 h-4 text-gray-400" /> Audit History
             </h3>
             <button onClick={loadHistory}
               className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700">
@@ -2229,6 +2279,17 @@ function ScanDetailPage() {
 
   const ts = (v) => v ? new Date(v).toLocaleString() : '—';
 
+  const exportReport = async (fmt) => {
+    if (!report) return;
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `shadow-ai-audit-${(job.job_id || job._id || 'report').slice(0, 8)}.${fmt}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div>
       {toast && (
@@ -2237,14 +2298,14 @@ function ScanDetailPage() {
         </div>
       )}
 
-      <PageHeader title="Scan Detail" subtitle="View job status, metadata, and report" />
+      <PageHeader title="Audit Detail" subtitle="View job status, findings, severity, and remediation" />
 
       {/* Lookup form */}
       <Card className="p-6 mb-6">
         <form onSubmit={handleLookup} className="flex gap-3 items-end">
           <div className="flex-1">
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Job / Scan ID
+              Audit / Job ID
             </label>
             <input
               type="text"
@@ -2322,7 +2383,7 @@ function ScanDetailPage() {
           <div>
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-semibold text-gray-900 flex items-center gap-2">
-                <FileText className="w-4 h-4 text-indigo-500" /> Report
+                <FileText className="w-4 h-4 text-indigo-500" /> Findings & Report
               </h3>
               {!report && !reportLoading && job.status === 'completed' && (
                 <button onClick={() => loadReport(job.job_id || job._id)}
@@ -2340,16 +2401,44 @@ function ScanDetailPage() {
               <div className="space-y-4">
                 {/* Summary */}
                 <Card className="p-4">
-                  <p className="text-xs text-gray-500 mb-2">Summary</p>
-                  <div className="grid grid-cols-3 gap-4 text-center">
+                  {/* Header with risk level + export */}
+                  <div className="flex items-center justify-between mb-4">
+                    <div>
+                      <p className="text-xs text-gray-500 mb-1">Overall Risk Level</p>
+                      <span className={`text-lg font-bold px-3 py-1 rounded-full ${
+                        report.summary?.risk_level === 'critical' ? 'bg-red-100 text-red-700' :
+                        report.summary?.risk_level === 'high' ? 'bg-orange-100 text-orange-700' :
+                        report.summary?.risk_level === 'medium' ? 'bg-yellow-100 text-yellow-700' :
+                        'bg-green-100 text-green-700'
+                      }`}>
+                        {(report.summary?.risk_level || 'unknown').toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={() => exportReport('json')}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-indigo-700
+                          bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100">
+                        <FileText className="w-3.5 h-3.5" /> Export JSON
+                      </button>
+                      <button onClick={() => exportReport('json')}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-700
+                          bg-red-50 border border-red-200 rounded-lg hover:bg-red-100">
+                        <FileText className="w-3.5 h-3.5" /> Export PDF
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Stats row */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
                     {[
-                      ['Risk Level', (report.summary?.risk_level || 'unknown').toUpperCase()],
-                      ['Findings', report.summary?.findings_count ?? report.findings?.length ?? 0],
-                      ['Devices w/ Findings', report.summary?.devices_with_findings ?? '—'],
+                      ['Total Findings', report.summary?.findings_count ?? report.findings?.length ?? 0],
+                      ['Critical', report.findings?.filter(f => f.severity === 'critical').length ?? 0],
+                      ['High', report.findings?.filter(f => f.severity === 'high').length ?? 0],
+                      ['Medium / Low', report.findings?.filter(f => ['medium','low'].includes(f.severity)).length ?? 0],
                     ].map(([k, v]) => (
-                      <div key={k}>
-                        <p className="text-xs text-gray-500 uppercase">{k}</p>
-                        <p className="text-xl font-bold text-gray-900">{v}</p>
+                      <div key={k} className="bg-gray-50 rounded-lg p-2">
+                        <p className="text-xs text-gray-500">{k}</p>
+                        <p className="text-lg font-bold text-gray-900">{v}</p>
                       </div>
                     ))}
                   </div>
@@ -2380,25 +2469,30 @@ function ScanDetailPage() {
                       <table className="w-full text-xs">
                         <thead>
                           <tr className="text-gray-500 border-b">
-                            <th className="text-left pb-2 pr-4">Severity</th>
-                            <th className="text-left pb-2 pr-4">Type</th>
-                            <th className="text-left pb-2">Indicator</th>
+                            <th className="text-left pb-2 pr-3">Severity</th>
+                            <th className="text-left pb-2 pr-3">Type</th>
+                            <th className="text-left pb-2 pr-3">Indicator</th>
+                            <th className="text-left pb-2">Remediation</th>
                           </tr>
                         </thead>
                         <tbody>
                           {report.findings.slice(0, 20).map((f, i) => (
                             <tr key={i} className="border-b border-gray-50">
-                              <td className="py-2 pr-4">
-                                <span className={`text-xs px-2 py-0.5 rounded-full ${
+                              <td className="py-2 pr-3">
+                                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                                   severityColor[f.severity] || 'bg-gray-100 text-gray-600'
                                 }`}>
                                   {(f.severity || '?').toUpperCase()}
                                 </span>
                               </td>
-                              <td className="py-2 pr-4 text-gray-600">{f.type || f.category || '—'}</td>
-                              <td className="py-2 font-mono text-gray-800 truncate max-w-xs"
+                              <td className="py-2 pr-3 text-gray-600">{f.type || f.category || '—'}</td>
+                              <td className="py-2 pr-3 font-mono text-gray-800 truncate max-w-xs"
                                 title={f.indicator}>
                                 {f.indicator || '—'}
+                              </td>
+                              <td className="py-2 text-gray-600 text-xs"
+                                title={f.remediation}>
+                                {f.remediation ? f.remediation.slice(0, 60) + (f.remediation.length > 60 ? '…' : '') : '—'}
                               </td>
                             </tr>
                           ))}

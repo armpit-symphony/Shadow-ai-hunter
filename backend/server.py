@@ -362,6 +362,7 @@ class UserCreateRequest(BaseModel):
     full_name: Optional[str] = None
     role: UserRole = UserRole.VIEWER
     disabled: bool = False
+    tenant_id: str = "default"
 
 
 class UserUpdateRequest(BaseModel):
@@ -389,6 +390,7 @@ def _user_public(doc: Dict[str, Any]) -> Dict[str, Any]:
         "role": doc.get("role", "viewer"),
         "disabled": doc.get("disabled", False),
         "created_at": doc.get("created_at"),
+        "tenant_id": doc.get("tenant_id", "default"),
     }
 
 

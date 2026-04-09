@@ -68,11 +68,11 @@ async def login(
         )
 
     access_token = create_access_token(
-        data={"sub": user.username, "role": user.role.value},
+        data={"sub": user.username, "role": user.role.value, "tenant_id": user.tenant_id},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     )
     refresh_token = create_refresh_token(
-        data={"sub": user.username, "role": user.role.value, "type": "refresh"},
+        data={"sub": user.username, "role": user.role.value, "tenant_id": user.tenant_id, "type": "refresh"},
         expires_delta=timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
     )
     csrf_token = secrets.token_urlsafe(32)
@@ -138,7 +138,7 @@ async def refresh_token(request: Request, response: Response):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
 
     access_token = create_access_token(
-        data={"sub": user.username, "role": user.role.value},
+        data={"sub": user.username, "role": user.role.value, "tenant_id": user.tenant_id},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     )
     response.set_cookie(

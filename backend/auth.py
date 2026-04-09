@@ -64,6 +64,7 @@ class TokenData(BaseModel):
     """Decoded token payload"""
     sub: str  # username
     role: UserRole
+    tenant_id: str = "default"
     exp: Optional[datetime] = None
 
 
@@ -74,6 +75,7 @@ class User(BaseModel):
     full_name: Optional[str] = None
     role: UserRole = UserRole.VIEWER
     disabled: bool = False
+    tenant_id: str = "default"
 
 
 class UserInDB(User):
@@ -199,6 +201,7 @@ def get_user(username: str) -> Optional[UserInDB]:
         hashed_password=doc["hashed_password"],
         refresh_token_hash=doc.get("refresh_token_hash"),
         refresh_expires_at=doc.get("refresh_expires_at"),
+        tenant_id=doc.get("tenant_id", "default"),
     )
 
 

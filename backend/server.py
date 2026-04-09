@@ -18,6 +18,7 @@ from bson import ObjectId
 # Import auth
 import auth as auth_module
 import redis.asyncio as redis_async
+from models.job_model import JobCreate
 from auth import (
     User, UserRole, require_admin, require_analyst, require_viewer,
     get_current_active_user, get_password_hash,
@@ -1028,6 +1029,96 @@ async def get_scan(scan_id: str, current_user: User = Depends(require_viewer)):
     except Exception as e:
         logger.error(f"Error getting scan: {e}")
         raise HTTPException(status_code=500, detail="Failed to get scan")
+
+
+# ---------------------------------------------------------------------------
+# Orchestrated Scan Endpoints (Phase 3 — Job Model)
+# ---------------------------------------------------------------------------
+
+@app.post("/scan")
+async def create_scan(
+    job: JobCreate,
+    current_user: User = Depends(require_analyst),
+):
+    """
+    Unified scan creation endpoint.
+    Creates a job record, fans out to appropriate worker queues.
+    """
+    try:
+        from orchestrator import create_job
+
+        job_data = {
+            "tenant_id": job.tenant_id,
+            "job_name": job.job_name,
+            "target_type": job.target_type,
+            "target_value": job.target_value,
+            "modules_enabled": job.modules_enabled,
+            "metadata": {
+                **job.metadata,
+                "initiated_by": current_user.username,
+            },
+        }
+        job_id = create_job(job_data)
+        return {"message": "Scan job created", "job_id": job_id, "status": "queued"}
+    except Exception as e:
+        logger.error(f"Error creating scan job: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create scan job")
+
+
+@app.get("/scan/{job_id}")
+async def get_scan_job(
+    job_id: str,
+    current_user: User = Depends(require_viewer),
+):
+    """Get a specific scan job by ID."""
+    try:
+        from orchestrator import get_job
+        doc = get_job(job_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return doc
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting scan job: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get scan job")
+
+
+@app.get("/scans")
+async def list_scan_jobs(
+    page: int = 1,
+    page_size: int = 20,
+    current_user: User = Depends(require_viewer),
+):
+    """List scan jobs for the current tenant with pagination."""
+    try:
+        from orchestrator import list_jobs
+        tenant_id = "default"  # Will be derived from current_user in Phase 4
+        return list_jobs(tenant_id=tenant_id, page=page, page_size=page_size)
+    except Exception as e:
+        logger.error(f"Error listing scan jobs: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list scan jobs")
+
+
+@app.delete("/scan/{job_id}")
+async def cancel_scan_job(
+    job_id: str,
+    current_user: User = Depends(require_admin),
+):
+    """Cancel a queued or running scan job."""
+    try:
+        from orchestrator import cancel_job
+        cancelled = cancel_job(job_id)
+        if not cancelled:
+            raise HTTPException(
+                status_code=409, detail="Job cannot be cancelled (not found or already complete)"
+            )
+        return {"message": "Job cancelled", "job_id": job_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling scan job: {e}")
+        raise HTTPException(status_code=500, detail="Failed to cancel scan job")
 
 
 # ---------------------------------------------------------------------------

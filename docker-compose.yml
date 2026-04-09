@@ -43,8 +43,8 @@ services:
     environment:
       - MONGO_URL=${MONGO_URL:-mongodb://admin:changeme@mongodb:27017/shadow_ai_hunter?authSource=admin}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-CHANGE-THIS-SECRET-IN-PRODUCTION}
-      - SECRET_KEY=${SECRET_KEY:-CHANGE-THIS-SECRET-IN-PRODUCTION}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set — no default}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set — no default}
       - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-changeme-admin}
       - DEFAULT_ANALYST_PASSWORD=${DEFAULT_ANALYST_PASSWORD:-changeme-analyst}
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}

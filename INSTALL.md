@@ -2,30 +2,97 @@
 
 ## Quick Start (Plug & Play) 🚀
 
-### Option 1: One-Command Start (Recommended)
+### Prerequisites
+- Docker 20.0+, Docker Compose 2.0+
+- **Node 18** (for local frontend builds — the frontend Dockerfile uses `node:18-alpine`; see `.nvmrc`)
+- 8 GB RAM minimum (16 GB recommended)
+- Ports 80, 443, 3000, 8001, 27017, 6379 available
+
+### Step 1: Create .env file (required)
 ```bash
-# Make start script executable and run
-chmod +x start.sh
-./start.sh
+cp .env.example .env   # if .env.example exists
+# OR create manually with required vars below
 ```
 
-That's it! The script will:
-- ✅ Check system requirements
-- ✅ Set up the environment  
-- ✅ Start all services with Docker
-- ✅ Load demo data
-- ✅ Open the dashboard at http://localhost
-
-### Option 2: Docker Compose
+**Required environment variables:**
 ```bash
-# Start all services
+# Security (MUST be set — app will fail to start without these)
+JWT_SECRET_KEY=your-random-256-bit-secret-here
+SECRET_KEY=your-random-256-bit-secret-here
+
+# Database credentials (MUST be set)
+MONGO_PASSWORD=your-mongo-password-here
+REDIS_PASSWORD=your-redis-password-here
+
+# Default admin credentials (change these before any deployment)
+DEFAULT_ADMIN_PASSWORD=change-this-admin-password
+DEFAULT_ANALYST_PASSWORD=change-this-analyst-password
+
+# Optional: set these explicitly for clarity
+MONGO_URL=mongodb://admin:${MONGO_PASSWORD}@localhost:27017/shadow_ai_hunter?authSource=admin
+REDIS_URL=redis://:${REDIS_PASSWORD}@localhost:6379/0
+
+# Frontend
+REACT_APP_BACKEND_URL=http://localhost:8001
+```
+
+Generate a strong secret:
+```bash
+openssl rand -hex 32
+```
+
+### Step 2: Start services
+```bash
 docker-compose up -d
-
-# Load demo data
-curl -X GET "http://localhost:8001/api/demo/populate"
-
-# Access at http://localhost
+docker-compose ps   # verify all services are healthy
 ```
+
+### Step 3: Check service health
+```bash
+# Backend should respond
+curl -s http://localhost:8001/api/health | head -3
+
+# Frontend should be up
+curl -s -o /dev/null -w "%{http_code}" http://localhost:3000
+
+# All containers healthy
+docker-compose ps
+```
+
+### Step 4: Seed default users
+```bash
+curl -X GET "http://localhost:8001/api/demo/populate" 2>/dev/null ||   echo "Demo populate unavailable in production mode"
+```
+
+### Step 5: Log in
+- URL: http://localhost:3000
+- Admin: `admin` / password from `DEFAULT_ADMIN_PASSWORD`
+- Analyst: `analyst` / password from `DEFAULT_ANALYST_PASSWORD`
+
+### Step 6: Submit a test scan
+1. Log in and go to **Network Scan** (sidebar)
+2. Enter a network range (e.g. `192.168.1.0/24` or `10.0.0.0/24`)
+3. Click **Start Scan** — scan is queued and processed by the worker
+4. Watch live progress via WebSocket, or go to **Scan Detail** to look up by ID
+5. Generate a report from the **Scan Detail** page after completion
+
+---
+
+### Migration Notes: Legacy vs. Orchestrated Endpoints
+
+This release introduces a new **orchestrated job model** (Phase 3) while preserving all legacy endpoints for backwards compatibility.
+
+| Operation | New (Orchestrated) | Legacy Fallback |
+|-----------|-------------------|-----------------|
+| Create scan | `POST /scan` | `POST /api/scan` |
+| List scans | `GET /scans` | `GET /api/scans` |
+| Get scan | `GET /scan/{id}` | `GET /api/scans/{id}` |
+| Get report | `GET /reports/{id}` | `POST /api/reports/generate` |
+
+**Frontend behaviour:** The React app automatically uses the new endpoints where available and falls back to legacy endpoints when needed. No action required from users.
+
+**For future migration:** Legacy endpoints will be removed once all clients use the orchestrated API. The `/api/` prefix is the signal to identify legacy routes.
+
 
 ## System Requirements
 
@@ -52,8 +119,12 @@ pip install -r requirements.txt -r ../requirements-dev.txt
 python server.py
 ```
 
-### Frontend Setup  
+### Frontend Setup (Node 18 required)
 ```bash
+# Use Node 18 (see .nvmrc for exact version)
+# If using nvm: nvm install 18 && nvm use 18
+node --version  # confirm v18.x.x
+
 cd frontend
 yarn install  # or npm install
 yarn start    # or npm start

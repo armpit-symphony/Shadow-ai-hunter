@@ -98,15 +98,23 @@ def _seed_default_users() -> None:
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Shadow AI Hunter Backend...")
+    def _safe_create_index(collection, index_spec, **kwargs):
+        """Create index if it doesn't exist, handle conflicts gracefully."""
+        try:
+            collection.create_index(index_spec, **kwargs)
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.warning(f"Index creation warning (may be harmless): {e}")
+
     try:
-        scans_collection.create_index("timestamp")
-        devices_collection.create_index("ip_address")
-        alerts_collection.create_index("created_at")
-        users_collection.create_index("username", unique=True)
-        baselines_collection.create_index("segment", unique=True)
-        audit_logs_collection.create_index("timestamp")
-        ws_events_collection.create_index("created_at")
-        siem_deliveries_collection.create_index("timestamp")
+        _safe_create_index(scans_collection, "timestamp")
+        _safe_create_index(devices_collection, "ip_address", unique=True)
+        _safe_create_index(alerts_collection, "created_at")
+        _safe_create_index(users_collection, "username", unique=True)
+        _safe_create_index(baselines_collection, "segment", unique=True)
+        _safe_create_index(audit_logs_collection, "timestamp")
+        _safe_create_index(ws_events_collection, "created_at")
+        _safe_create_index(siem_deliveries_collection, "timestamp")
         _configure_ttl_indexes()
 
         # Inject MongoDB into auth module so get_user() can query it
@@ -276,22 +284,21 @@ def _scan_transition(scan_id: str, from_statuses: List[str], to_status: str, ext
 
 
 def _configure_ttl_indexes() -> None:
+    def _safe_create_index(collection, index_spec, **kwargs):
+        """Create index if it doesn't exist, handle conflicts gracefully."""
+        try:
+            collection.create_index(index_spec, **kwargs)
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.warning(f"TTL index creation warning (may be harmless): {e}")
+
     events_ttl_days = int(os.getenv("EVENT_TTL_DAYS", "30"))
     ws_ttl_hours = int(os.getenv("WS_EVENT_TTL_HOURS", "6"))
     audit_ttl_days = int(os.getenv("AUDIT_TTL_DAYS", "365"))
 
-    events_collection.create_index(
-        "timestamp",
-        expireAfterSeconds=max(events_ttl_days, 1) * 24 * 60 * 60,
-    )
-    ws_events_collection.create_index(
-        "created_at",
-        expireAfterSeconds=max(ws_ttl_hours, 1) * 60 * 60,
-    )
-    audit_logs_collection.create_index(
-        "timestamp",
-        expireAfterSeconds=max(audit_ttl_days, 1) * 24 * 60 * 60,
-    )
+    _safe_create_index(events_collection, "timestamp", expireAfterSeconds=max(events_ttl_days, 1) * 24 * 60 * 60)
+    _safe_create_index(ws_events_collection, "created_at", expireAfterSeconds=max(ws_ttl_hours, 1) * 60 * 60)
+    _safe_create_index(audit_logs_collection, "timestamp", expireAfterSeconds=max(audit_ttl_days, 1) * 24 * 60 * 60)
 
 
 def _siem_retry() -> "Retry":

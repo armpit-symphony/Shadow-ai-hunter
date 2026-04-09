@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { smartCreateScan, smartListScans, smartGetScan, getReport } from './services/api';
 import {
   Shield, Activity, AlertTriangle, Search, Lock,
   Network, Zap, TrendingUp, BarChart3, LogOut,
@@ -232,6 +233,7 @@ function ProtectedLayout() {
       case 'alerts':    return <AlertsPage />;
       case 'policies':  return <PoliciesPage />;
       case 'scan':      return <ScanPage />;
+      case 'scan_detail': return <ScanDetailPage />;
       case 'baselines': return <BaselinesPage />;
       case 'lists':     return <ListsPage />;
       case 'users':     return <UsersPage />;
@@ -1881,11 +1883,15 @@ function ScanPage() {
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 4000); };
 
   const loadHistory = useCallback(() => {
-    api.get('/api/scans?limit=20')
-      .then((r) => setScans(r.data.scans || []))
+    smartListScans({ page: 1, page_size: 20 })
+      .then((r) => {
+        // Support both new format (jobs[]) and legacy format (scans[])
+        const items = r.data?.jobs || r.data?.scans || [];
+        setScans(items);
+      })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [api]);
+  }, []);
 
   useEffect(() => { loadHistory(); }, [loadHistory]);
 
@@ -1936,12 +1942,14 @@ function ScanPage() {
     if (!networkRange.trim()) return;
     setScanning(true);
     try {
-      const r = await api.post('/api/scan', {
-        network_range: networkRange.trim(),
-        scan_type: scanType,
-        deep_scan: deepScan,
+      const r = await smartCreateScan({
+        target_type: 'network',
+        target_value: networkRange.trim(),
+        modules_enabled: ['target_scanner'],
+        job_name: `Scan of ${networkRange.trim()}`,
       });
-      showToast(`Scan queued (ID: ${r.data.scan_id?.slice(0, 8)}…). Results will appear in history.`);
+      const id = r.job_id || r.scan_id;
+      showToast(`Scan queued (ID: ${id?.slice(0, 8)}…). Results will appear in history.`);
       setTimeout(loadHistory, 3000);
       setTimeout(loadHistory, 8000);
     } catch (err) {
@@ -2141,6 +2149,274 @@ function ScanPage() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scan Detail Page — Phase 8: orchestrated scan + report view
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ScanDetailPage() {
+  const [jobId, setJobId] = useState('');
+  const [job, setJob] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [report, setReport] = useState(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [toast, setToast] = useState('');
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 4000); };
+
+  const loadJob = useCallback(async (id) => {
+    setLoading(true);
+    setError('');
+    setJob(null);
+    setReport(null);
+    try {
+      const data = await smartGetScan(id);
+      // Support both new (flat) and legacy (wrapped {scan:...}) formats
+      const resolved = data.data || data;
+      setJob(resolved.scan || resolved);
+    } catch (e) {
+      setError(e?.detail || e?.message || 'Failed to load scan');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const loadReport = useCallback(async (id) => {
+    setReportLoading(true);
+    try {
+      // Try new endpoint first
+      const data = await getReport(id);
+      setReport(data.report || data);
+    } catch {
+      try {
+        // Fallback: generate legacy report
+        const { generateLegacyReport } = await import('./services/api');
+        const r = await generateLegacyReport({ scan_id: id, fmt: 'json' });
+        setReport(r);
+      } catch (e2) {
+        setReport({ error: e2?.detail || 'No report available' });
+      }
+    } finally {
+      setReportLoading(false);
+    }
+  }, []);
+
+  const handleLookup = (e) => {
+    e.preventDefault();
+    if (!jobId.trim()) return;
+    loadJob(jobId.trim());
+    loadReport(jobId.trim());
+  };
+
+  const scanStatusColor = {
+    queued:    'bg-yellow-100 text-yellow-700',
+    running:   'bg-blue-100 text-blue-700',
+    completed: 'bg-green-100 text-green-700',
+    failed:    'bg-red-100 text-red-700',
+    cancelled: 'bg-gray-100 text-gray-700',
+  };
+
+  const severityColor = {
+    critical: 'bg-red-100 text-red-700',
+    high:     'bg-orange-100 text-orange-700',
+    medium:   'bg-yellow-100 text-yellow-700',
+    low:      'bg-green-100 text-green-700',
+  };
+
+  const ts = (v) => v ? new Date(v).toLocaleString() : '—';
+
+  return (
+    <div>
+      {toast && (
+        <div className="fixed top-4 right-4 z-50 bg-gray-900 text-white px-4 py-2 rounded-lg shadow-lg text-sm max-w-sm">
+          {toast}
+        </div>
+      )}
+
+      <PageHeader title="Scan Detail" subtitle="View job status, metadata, and report" />
+
+      {/* Lookup form */}
+      <Card className="p-6 mb-6">
+        <form onSubmit={handleLookup} className="flex gap-3 items-end">
+          <div className="flex-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Job / Scan ID
+            </label>
+            <input
+              type="text"
+              value={jobId}
+              onChange={(e) => setJobId(e.target.value)}
+              placeholder="e.g. 67fbc3a2e4b3..."
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono"
+            />
+          </div>
+          <button type="submit" disabled={loading || !jobId.trim()}
+            className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm disabled:opacity-50">
+            {loading ? 'Loading…' : 'Look up'}
+          </button>
+        </form>
+      </Card>
+
+      {/* Job metadata */}
+      {loading && <div className="text-center py-8 text-gray-400"><RefreshCw className="w-6 h-6 animate-spin mx-auto" /></div>}
+
+      {error && (
+        <Card className="p-6 mb-6">
+          <p className="text-red-600 text-sm">{error}</p>
+          <p className="text-xs text-gray-400 mt-2">
+            Note: scan IDs from before the Phase 3 upgrade are in legacy format.
+            Legacy IDs still work — the API layer handles fallback automatically.
+          </p>
+        </Card>
+      )}
+
+      {job && !loading && (
+        <div className="space-y-6">
+          {/* Status card */}
+          <Card className="p-6">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-3 mb-3">
+                  <span className={`text-sm px-3 py-1 rounded-full font-medium ${
+                    scanStatusColor[job.status] || 'bg-gray-100 text-gray-700'}`}>
+                    {job.status || 'unknown'}
+                  </span>
+                  {job.job_id && (
+                    <span className="text-xs text-gray-400 font-mono">ID: {job.job_id.slice(0, 12)}…</span>
+                  )}
+                  {job._id && !job.job_id && (
+                    <span className="text-xs text-gray-400 font-mono">ID: {String(job._id).slice(0, 12)}…</span>
+                  )}
+                </div>
+                <table className="text-sm">
+                  <tbody>
+                    {[
+                      ['Target', job.target_value || job.network_range || '—'],
+                      ['Type', job.target_type || job.scan_type || 'network'],
+                      ['Modules', (job.modules_enabled || []).join(', ') || 'target_scanner'],
+                      ['Tenant', job.tenant_id || 'default'],
+                      ['Created', ts(job.created_at || job.timestamp)],
+                      ['Started', ts(job.started_at)],
+                      ['Completed', ts(job.completed_at)],
+                    ].map(([k, v]) => v !== '—' && v && (
+                      <tr key={k}><td className="pr-6 py-1 text-gray-500">{k}</td>
+                        <td className="font-medium text-gray-900 font-mono text-xs">{String(v)}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="text-right text-sm text-gray-500 space-y-1">
+                <p>{job.devices_found != null ? `${job.devices_found} devices` : '—'}</p>
+                <p>{job.ai_services_detected != null ? `${job.ai_services_detected} AI services` : '—'}</p>
+                {job.initiated_by && <p>by {job.initiated_by}</p>}
+                {job.error && <p className="text-red-500 text-xs">Error: {job.error}</p>}
+              </div>
+            </div>
+          </Card>
+
+          {/* Report */}
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+                <FileText className="w-4 h-4 text-indigo-500" /> Report
+              </h3>
+              {!report && !reportLoading && job.status === 'completed' && (
+                <button onClick={() => loadReport(job.job_id || job._id)}
+                  className="text-xs text-indigo-600 hover:text-indigo-800">
+                  Load report →
+                </button>
+              )}
+            </div>
+
+            {reportLoading && <div className="text-center py-6 text-gray-400"><RefreshCw className="w-5 h-5 animate-spin mx-auto" /></div>}
+
+            {report?.error && <p className="text-sm text-gray-500">{report.error}</p>}
+
+            {report && !report.error && (
+              <div className="space-y-4">
+                {/* Summary */}
+                <Card className="p-4">
+                  <p className="text-xs text-gray-500 mb-2">Summary</p>
+                  <div className="grid grid-cols-3 gap-4 text-center">
+                    {[
+                      ['Risk Level', (report.summary?.risk_level || 'unknown').toUpperCase()],
+                      ['Findings', report.summary?.findings_count ?? report.findings?.length ?? 0],
+                      ['Devices w/ Findings', report.summary?.devices_with_findings ?? '—'],
+                    ].map(([k, v]) => (
+                      <div key={k}>
+                        <p className="text-xs text-gray-500 uppercase">{k}</p>
+                        <p className="text-xl font-bold text-gray-900">{v}</p>
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+
+                {/* Recommendations */}
+                {report.recommendations?.length > 0 && (
+                  <Card className="p-4">
+                    <p className="text-xs text-gray-500 mb-2 font-medium uppercase">Recommendations</p>
+                    <ol className="space-y-1">
+                      {report.recommendations.map((r, i) => (
+                        <li key={i} className="text-sm text-gray-700 flex gap-2">
+                          <span className="text-indigo-500 font-bold shrink-0">{i + 1}.</span>
+                          {r}
+                        </li>
+                      ))}
+                    </ol>
+                  </Card>
+                )}
+
+                {/* Findings table */}
+                {report.findings?.length > 0 && (
+                  <Card className="p-4">
+                    <p className="text-xs text-gray-500 mb-3 font-medium uppercase">
+                      Findings ({report.findings.length})
+                    </p>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-gray-500 border-b">
+                            <th className="text-left pb-2 pr-4">Severity</th>
+                            <th className="text-left pb-2 pr-4">Type</th>
+                            <th className="text-left pb-2">Indicator</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {report.findings.slice(0, 20).map((f, i) => (
+                            <tr key={i} className="border-b border-gray-50">
+                              <td className="py-2 pr-4">
+                                <span className={`text-xs px-2 py-0.5 rounded-full ${
+                                  severityColor[f.severity] || 'bg-gray-100 text-gray-600'
+                                }`}>
+                                  {(f.severity || '?').toUpperCase()}
+                                </span>
+                              </td>
+                              <td className="py-2 pr-4 text-gray-600">{f.type || f.category || '—'}</td>
+                              <td className="py-2 font-mono text-gray-800 truncate max-w-xs"
+                                title={f.indicator}>
+                                {f.indicator || '—'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {report.findings.length > 20 && (
+                        <p className="text-xs text-gray-400 mt-2">
+                          +{report.findings.length - 20} more findings (see full JSON report for complete list)
+                        </p>
+                      )}
+                    </div>
+                  </Card>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

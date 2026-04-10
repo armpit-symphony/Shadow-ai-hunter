@@ -346,12 +346,19 @@ async def get_devices(
 @app.get("/api/alerts")
 async def get_alerts(
     limit: int = 50,
+    notification_status: Optional[str] = None,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_token: Optional[str] = Header(None, alias="Authorization"),
 ):
     """
     Get recent alerts. When X-API-Key is provided, results are scoped to
     the key's bound project. JWT Bearer token users see all alerts.
+
+    notification_status values:
+      - sent       : notification was sent successfully
+      - failed     : notification was attempted but failed
+      - attempted  : notification was attempted (success or failure)
+      - unattempted: no notification was ever attempted
     """
     query = {}
     bound_project = None
@@ -375,6 +382,26 @@ async def get_alerts(
             {"source_project": bound_project},
             {"project_id": bound_project},
         ]
+
+    # Optional notification delivery status filter
+    if notification_status:
+        status = notification_status.lower()
+        if status == "sent":
+            query["notification_attempted"] = True
+            query["notification_sent"] = True
+        elif status == "failed":
+            query["notification_attempted"] = True
+            query["notification_sent"] = False
+        elif status == "attempted":
+            query["notification_attempted"] = True
+        elif status == "unattempted":
+            query["$or"] = query.get("$or", [])
+            query["$or"].append({"notification_attempted": {"$in": [None, False]}})
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid notification_status. Use: sent, failed, attempted, unattempted",
+            )
 
     try:
         alerts = list(alerts_collection.find(query, {"_id": 0}).sort("created_at", -1).limit(limit))

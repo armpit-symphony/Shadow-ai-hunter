@@ -18,18 +18,21 @@
 
 ## API Key Configuration
 
-`POST /ingest/event` requires a valid `X-API-Key` header.
+`POST /ingest/event` and `GET /ingest/status/{job_id}` both require a valid `X-API-Key` header.
 
-Set `INGEST_API_KEYS` as a comma-separated list of valid keys:
+Set `INGEST_API_KEYS` as `project-id:key` pairs, comma-separated:
 
 ```bash
 # docker-compose.env or .env
-INGEST_API_KEYS=key-for-sparkbot,key-for-project-b,key-for-project-c
+INGEST_API_KEYS=project-elephant:key-alpha,project-bison:key-beta,project-capybara:key-gamma
 ```
 
-> **No keys configured = endpoint returns 503** — this is intentional to prevent accidental open access.
+- Each key maps to **exactly one** project — cross-project access is rejected with 403
+- `POST /ingest/event`: the request `project` field must match the key's bound project
+- `GET /ingest/status/{job_id}`: returns 403 if the job's `source_project` does not match the key's bound project
+- Jobs with no `source_project` (pre-change records) are accessible with any valid key (backward compat)
 
-`GET /ingest/status/{job_id}` is **unauthenticated** — polling only, no write.
+> **No keys configured = endpoint returns 503** — fail-closed to prevent accidental open access.
 
 ---
 

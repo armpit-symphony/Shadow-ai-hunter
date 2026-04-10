@@ -40,31 +40,48 @@ events_collection = db.events
 security = HTTPBearer()
 
 # ---- Ingest API key guard ----
-_ingest_keys: Optional[set] = None
+# Format: INGEST_API_KEYS=project-a:key1,project-b:key2
+# Each key maps to exactly one project_id; the key grants access to that project only.
+_ingest_key_map: Optional[dict] = None  # {key: project_id}
 
-def _load_ingest_keys() -> set:
-    """Load valid ingest API keys from INGEST_API_KEYS env var (comma-separated)."""
-    global _ingest_keys
-    if _ingest_keys is None:
+
+def _load_ingest_key_map() -> dict:
+    """Parse INGEST_API_KEYS env var into {key: project_id} dict."""
+    global _ingest_key_map
+    if _ingest_key_map is None:
         raw = os.getenv("INGEST_API_KEYS", "")
-        _ingest_keys = {k.strip() for k in raw.split(",") if k.strip()}
-    return _ingest_keys
+        _ingest_key_map = {}
+        for entry in raw.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            # Format: project_id:key
+            if ":" not in entry:
+                continue
+            project_id, key = entry.split(":", 1)
+            _ingest_key_map[key.strip()] = project_id.strip()
+    return _ingest_key_map
+
+
+def _get_project_for_key(x_api_key: str) -> Optional[str]:
+    """Return the project_id this key is bound to, or None if invalid."""
+    return _load_ingest_key_map().get(x_api_key)
 
 
 def require_ingest_key(x_api_key: Optional[str] = None) -> str:
     """
     Validates X-API-Key header against INGEST_API_KEYS.
-    Call this inside an endpoint body after extracting the header via Header().
-    Raises HTTPException 401 on failure.
+    Raises HTTPException 401 on missing/invalid key, 503 if no keys configured.
+    Returns the validated key on success.
     """
-    keys = _load_ingest_keys()
-    if not keys:
+    key_map = _load_ingest_key_map()
+    if not key_map:
         logger.error("INGEST_API_KEYS is not set; /ingest/event is locked down")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Ingest endpoint has no API keys configured",
         )
-    if not x_api_key or x_api_key not in keys:
+    if not x_api_key or x_api_key not in key_map:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing X-API-Key",
@@ -584,14 +601,24 @@ async def ingest_event(
     request_data: IngestEventRequest,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ):
-    # Validate API key — raises 401 or 503 on failure
-    require_ingest_key(x_api_key)
     """
     Ingest telemetry events from an external project.
     Persists raw events, then kicks off async detection.
+    The X-API-Key must be bound to the same project as the request body.
     """
+    # Validate API key — raises 401 or 503 on failure
+    require_ingest_key(x_api_key)
+
     project = request_data.project
     raw_events = request_data.events
+
+    # Verify the key is bound to this project
+    bound_project = _get_project_for_key(x_api_key)
+    if bound_project and bound_project != project:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"This API key is bound to project '{bound_project}', not '{project}'",
+        )
 
     # Defensive re-validation
     if not project:
@@ -696,17 +723,34 @@ async def _run_detection_async(
 
 # ---- /ingest/status/{job_id} endpoint ----
 @app.get("/ingest/status/{job_id}", response_model=DetectionStatusResponse)
-async def get_ingest_status(job_id: str):
+async def get_ingest_status(
+    job_id: str,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
     """
     Poll the status of a detection job by its job_id (scan_id).
     Primary source of truth is the detections MongoDB collection.
     If the record doesn't exist yet but the job was enqueued in RQ, returns 'queued'.
+    The X-API-Key must be bound to the same project as the job, or the job must have no project.
     """
+    # Validate API key
+    require_ingest_key(x_api_key)
+    bound_project = _get_project_for_key(x_api_key)
+
     # ---- 1. Check detections collection first ----
     detection_collection_ref = db["detections"]
     detection = detection_collection_ref.find_one({"_id": job_id})
 
     if detection:
+        job_project = detection.get("source_project")
+        # Allow access if job has no project (backward compat for pre-change records)
+        # or if key's bound project matches
+        if job_project and bound_project and job_project != bound_project:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"This job belongs to project '{job_project}', but your key is bound to '{bound_project}'",
+            )
+
         completed_at_str = None
         if detection.get("completed_at"):
             ts = detection["completed_at"]

@@ -161,7 +161,9 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
     except Exception as e:
         logger.warning(f"[{scan_id}] Could not ensure indexes: {e}")
 
-    # ---- 1. Create and persist detection record in 'running' state ----
+    # ---- 1. Derive project_id from the first event (all events in a batch share the same project) ----
+    project_id = events[0].get("source_project") if events else None
+
     evidence_hash = hashlib.sha256(
         json.dumps(events, sort_keys=True, default=str).encode()
     ).hexdigest()
@@ -173,6 +175,7 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
         findings_count=0,
         risk_score=0.0,
         evidence_hash=evidence_hash,
+        source_project=project_id,
         raw_event_ids=[e.get("id") or e.get("_id", "unknown") for e in events],
     )
     persist_detection(detection_doc)
@@ -200,6 +203,7 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
                         indicator=f.get("indicator", ""),
                         severity=f.get("severity", "low"),
                         confidence=f.get("confidence", 0.5),
+                        project_id=project_id,
                         service=f.get("service"),
                         category=f.get("category"),
                         metadata={

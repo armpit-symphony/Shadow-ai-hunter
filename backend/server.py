@@ -611,6 +611,7 @@ async def ingest_event(
             **event,                          # preserve original fields
             "_id": event_id,
             "source_project": project,
+            "project_id": project,             # project_id mirrors source_project for query ergonomics
             "detection_status": "pending",    # will flip to "done" after detection
             "ingested_at": datetime.utcnow(),
         }

@@ -82,6 +82,7 @@ def create_finding_record(
     indicator: str,
     severity: str,
     confidence: float,
+    project_id: Optional[str] = None,
     service: Optional[str] = None,
     category: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
@@ -90,6 +91,7 @@ def create_finding_record(
     return {
         "_id": str(uuid4()),
         "detection_id": detection_id,          # FK → detections._id
+        "project_id": project_id,              # which project sent the originating event
         "type": finding_type,
         "indicator": indicator,
         "severity": severity,                  # critical | high | medium | low

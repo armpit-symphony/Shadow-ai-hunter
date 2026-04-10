@@ -144,6 +144,27 @@ def persist_alert(alert: Dict[str, Any]) -> str:
     return alert["_id"]
 
 
+def update_alert_notification_status(
+    alert_id: str,
+    notification_attempted: bool,
+    notification_sent: bool,
+    notification_error: Optional[str] = None,
+) -> None:
+    """Update notification delivery fields on an existing alert document."""
+    col = get_collection(ALERTS_COL)
+    col.update_one(
+        {"_id": alert_id},
+        {
+            "$set": {
+                "notification_attempted": notification_attempted,
+                "notification_sent": notification_sent,
+                "notification_last_attempt_at": datetime.utcnow(),
+                "notification_error": notification_error,
+            }
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Persistence helpers
 # ---------------------------------------------------------------------------

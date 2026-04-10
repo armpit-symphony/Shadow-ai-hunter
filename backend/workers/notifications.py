@@ -12,6 +12,7 @@ import os
 import urllib.error
 import urllib.request
 from datetime import datetime
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +24,10 @@ def should_notify(severity: str) -> bool:
     return severity.lower() in _NOTIFY_SEVERITIES
 
 
-def send_alert_webhook(alert: dict) -> bool:
+def send_alert_webhook(alert: dict) -> tuple[bool, Optional[str]]:
     """
     POST a compact alert payload to ALERT_WEBHOOK_URL.
-    Returns True if delivered successfully, False otherwise.
+    Returns (True, None) on success, (False, error_message) on failure.
     Does not raise exceptions — all failures are logged and swallowed.
     """
     webhook_url = os.getenv("ALERT_WEBHOOK_URL", "").strip()
@@ -61,32 +62,34 @@ def send_alert_webhook(alert: dict) -> bool:
                 f"[notification] Alert webhook delivered for '{alert.get('_id')}' "
                 f"(severity={alert.get('severity')}) — HTTP {status}"
             )
-            return True
+            return True, None
     except urllib.error.HTTPError as e:
         logger.warning(
             f"[notification] Alert webhook HTTP error for '{alert.get('_id')}': "
             f"HTTP {e.code} — not retrying"
         )
+        return False, f"HTTP {e.code}"
     except urllib.error.URLError as e:
         logger.warning(
             f"[notification] Alert webhook URL error for '{alert.get('_id')}': "
             f"{e.reason} — not retrying"
         )
+        return False, str(e.reason)
     except Exception as e:
         logger.warning(
             f"[notification] Alert webhook unexpected error for '{alert.get('_id')}': "
             f"{type(e).__name__}: {e} — not retrying"
         )
+        return False, f"{type(e).__name__}: {e}"
 
-    return False
 
-
-def notify_if_high_severity(alert: dict) -> None:
+def notify_if_high_severity(alert: dict) -> tuple[bool, Optional[str]]:
     """
     Send a webhook notification if the alert severity is high or critical.
+    Returns (notification_attempted, notification_sent, notification_error).
     Safe to call fire-and-forget style — all errors are caught and logged.
     """
     if not should_notify(alert.get("severity", "")):
-        return
-    send_alert_webhook(alert)
+        return False, None
+    return send_alert_webhook(alert)
 

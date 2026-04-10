@@ -251,8 +251,15 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
 
                 # Outbound notification — fire-and-forget, never blocks
                 from workers.notifications import notify_if_high_severity
+                from workers.models import update_alert_notification_status
                 try:
-                    notify_if_high_severity(alert)
+                    sent, error = notify_if_high_severity(alert)
+                    update_alert_notification_status(
+                        alert_id=alert["_id"],
+                        notification_attempted=True,
+                        notification_sent=sent,
+                        notification_error=error,
+                    )
                 except Exception:
                     logger.exception(f"[{scan_id}] Unexpected error in alert notification")
 

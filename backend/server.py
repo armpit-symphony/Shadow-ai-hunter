@@ -492,6 +492,54 @@ async def update_alert(
     return updated
 
 
+@app.get("/api/usage")
+async def get_usage(
+    project_id: str,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    current_user: User = Depends(require_analyst),
+):
+    """
+    Read usage_records for a specific project.
+    Operator-only (JWT analyst/admin).
+    Returns daily usage records sorted in ascending date order.
+    Supports optional YYYY-MM-DD date range filtering.
+    """
+    from datetime import datetime
+    from workers.models import USAGE_RECORDS_COL
+
+    query: Dict[str, Any] = {"project_id": project_id}
+
+    # Parse from_date
+    if from_date:
+        try:
+            from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="from_date must be YYYY-MM-DD")
+        query.setdefault("date_bucket", {})["$gte"] = from_dt
+
+    # Parse to_date
+    if to_date:
+        try:
+            to_dt = datetime.strptime(to_date, "%Y-%m-%d")
+            # Include the full day — set to end of day
+            to_dt = to_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="to_date must be YYYY-MM-DD")
+        query.setdefault("date_bucket", {})["$lte"] = to_dt
+
+    try:
+        records = list(
+            db[USAGE_RECORDS_COL]
+            .find(query, {"_id": 0})
+            .sort("date_bucket", ASCENDING)
+        )
+        return {"usage": records}
+    except Exception as e:
+        logger.error(f"Error reading usage records: {e}")
+        raise HTTPException(status_code=500, detail="Failed to read usage records")
+
+
 @app.post("/api/alerts/{alert_id}/retry-notification")
 async def retry_alert_notification(
     alert_id: str,

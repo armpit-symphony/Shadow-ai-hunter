@@ -40,48 +40,66 @@ events_collection = db.events
 security = HTTPBearer()
 
 # ---- Ingest API key guard ----
-# Format: INGEST_API_KEYS=project-a:key1,project-b:key2
-# Each key maps to exactly one project_id; the key grants access to that project only.
-_ingest_key_map: Optional[dict] = None  # {key: project_id}
+# Keys are checked against:
+#   1. MongoDB api_keys collection (primary, hot-reloadable)
+#   2. INGEST_API_KEYS env var (legacy fallback, requires restart)
+_ingest_key_map_env: Optional[dict] = None  # cached env var parse
 
 
-def _load_ingest_key_map() -> dict:
-    """Parse INGEST_API_KEYS env var into {key: project_id} dict."""
-    global _ingest_key_map
-    if _ingest_key_map is None:
+def _load_env_key_map() -> dict:
+    """Parse INGEST_API_KEYS env var into {key: project_id} dict (legacy fallback)."""
+    global _ingest_key_map_env
+    if _ingest_key_map_env is None:
         raw = os.getenv("INGEST_API_KEYS", "")
-        _ingest_key_map = {}
+        _ingest_key_map_env = {}
         for entry in raw.split(","):
             entry = entry.strip()
-            if not entry:
-                continue
-            # Format: project_id:key
-            if ":" not in entry:
+            if not entry or ":" not in entry:
                 continue
             project_id, key = entry.split(":", 1)
-            _ingest_key_map[key.strip()] = project_id.strip()
-    return _ingest_key_map
+            _ingest_key_map_env[key.strip()] = project_id.strip()
+    return _ingest_key_map_env
 
 
 def _get_project_for_key(x_api_key: str) -> Optional[str]:
-    """Return the project_id this key is bound to, or None if invalid."""
-    return _load_ingest_key_map().get(x_api_key)
+    """
+    Return the project_id this key is bound to, or None if invalid.
+    Checks MongoDB api_keys collection first (hot), then falls back to
+    the INGEST_API_KEYS env var (static, requires restart).
+    """
+    # Import lazily to avoid circular import at module load time
+    from workers import api_keys as mongo_keys
+    # MongoDB source (primary)
+    project = mongo_keys.get_project_for_key(x_api_key)
+    if project:
+        return project
+    # Env var fallback (static, legacy)
+    return _load_env_key_map().get(x_api_key)
 
 
 def require_ingest_key(x_api_key: Optional[str] = None) -> str:
     """
-    Validates X-API-Key header against INGEST_API_KEYS.
-    Raises HTTPException 401 on missing/invalid key, 503 if no keys configured.
+    Validates X-API-Key header against the api_keys collection (or INGEST_API_KEYS env).
+    Raises HTTPException 401 on missing/invalid key, 503 if no keys are configured.
     Returns the validated key on success.
     """
-    key_map = _load_ingest_key_map()
-    if not key_map:
-        logger.error("INGEST_API_KEYS is not set; /ingest/event is locked down")
+    if not x_api_key:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Ingest endpoint has no API keys configured",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-API-Key",
         )
-    if not x_api_key or x_api_key not in key_map:
+    project = _get_project_for_key(x_api_key)
+    if project is None:
+        # Check if any keys exist at all (MongoDB or env)
+        from workers import api_keys as mongo_keys
+        env_map = _load_env_key_map()
+        mongo_keys_count = len(mongo_keys.get_valid_keys())
+        if not env_map and mongo_keys_count == 0:
+            logger.error("No API keys configured; /ingest/event is locked down")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Ingest endpoint has no API keys configured",
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing X-API-Key",
@@ -101,6 +119,13 @@ async def lifespan(app: FastAPI):
         events_collection.create_index("source_project")
         events_collection.create_index("detection_status")
         events_collection.create_index("created_at")
+        # Initialize api_keys collection
+        try:
+            from workers import api_keys as mongo_keys
+            mongo_keys.ensure_api_keys_indexes()
+            logger.info("api_keys collection initialized")
+        except Exception as e:
+            logger.warning(f"api_keys initialization skipped: {e}")
         logger.info("Database initialized successfully")
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
@@ -1059,6 +1084,31 @@ async def get_scan(
     except Exception as e:
         logger.error(f"Error getting scan: {e}")
         raise HTTPException(status_code=500, detail="Failed to get scan")
+
+
+# ---- /admin/api-keys endpoint ----
+@app.post("/admin/api-keys")
+async def create_api_key(
+    project_id: str,
+    current_user: User = Depends(require_analyst),
+):
+    """
+    Create a new API key for a project.
+    Operator-only (requires analyst JWT). The generated key is returned once
+    and cannot be retrieved later — store it securely.
+    """
+    from workers import api_keys as mongo_keys
+    try:
+        doc = mongo_keys.store_api_key(project_id=project_id, created_by=current_user.username)
+        return {
+            "message": "API key created",
+            "api_key": doc["api_key"],
+            "project_id": doc["project_id"],
+            "created_at": doc["created_at"].isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Error creating API key: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create API key")
 
 
 if __name__ == "__main__":

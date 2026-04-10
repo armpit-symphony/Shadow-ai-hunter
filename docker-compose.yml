@@ -16,16 +16,13 @@ services:
       - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
     networks:
       - shadow_ai_network
-    # Security: MongoDB is not exposed externally in production;
-    # remove the 'ports' block and use internal networking only.
 
   redis:
     image: redis:7-alpine
     container_name: shadow_ai_redis
     restart: unless-stopped
-    # Redis is internal only; remove 'ports' in production.
     ports:
-      - "127.0.0.1:6379:6379"
+      - "6379:6379"
     volumes:
       - redis_data:/data
     networks:
@@ -33,7 +30,7 @@ services:
     command: redis-server --appendonly yes
 
   backend:
-    build:
+    build: 
       context: ./backend
       dockerfile: Dockerfile
     container_name: shadow_ai_backend
@@ -43,11 +40,9 @@ services:
     environment:
       - MONGO_URL=${MONGO_URL:-mongodb://admin:changeme@mongodb:27017/shadow_ai_hunter?authSource=admin}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-CHANGE-THIS-SECRET-IN-PRODUCTION}
-      - SECRET_KEY=${SECRET_KEY:-CHANGE-THIS-SECRET-IN-PRODUCTION}
-      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-changeme-admin}
-      - DEFAULT_ANALYST_PASSWORD=${DEFAULT_ANALYST_PASSWORD:-changeme-analyst}
-      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      # ENABLE_FALLBACK=true: auto-runs detection inline (dev/local only, no worker needed)
+      - ENABLE_FALLBACK=${ENABLE_FALLBACK:-false}
     depends_on:
       - mongodb
       - redis
@@ -55,9 +50,8 @@ services:
       - ./backend:/app
     networks:
       - shadow_ai_network
-    # SECURITY: Do NOT run privileged in production.
-    # If you need nmap scanning, use the worker service (has NET_RAW/NET_ADMIN caps).
-    # privileged: true  # REMOVED — security risk
+    # SECURITY: Do NOT run privileged in production
+    # privileged: true  # REMOVED - security risk
 
   worker:
     build:
@@ -65,16 +59,12 @@ services:
       dockerfile: Dockerfile
     container_name: shadow_ai_worker
     restart: unless-stopped
-    # Run the RQ worker listening on all defined queues
-    command: >
-      rq worker
-      scans detection telemetry enrichment reports
-      --url redis://redis:6379/0
-      --log-format "%(asctime)s %(levelname)s %(message)s"
+    command: python run_worker.py
     environment:
       - MONGO_URL=${MONGO_URL:-mongodb://admin:changeme@mongodb:27017/shadow_ai_hunter?authSource=admin}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - SCAN_MAX_HOSTS=${SCAN_MAX_HOSTS:-254}
+      # ENABLE_FALLBACK must remain absent/false in worker — detection always goes through RQ
+      - ENABLE_FALLBACK=false
     depends_on:
       - mongodb
       - redis
@@ -82,12 +72,11 @@ services:
       - ./backend:/app
     networks:
       - shadow_ai_network
-    # Network capabilities required for nmap / tcpdump scanning.
-    # These are far safer than 'privileged: true'.
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    # No public ports — workers communicate only via Redis queue.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis; r = redis.from_url('redis://redis:6379/0'); r.ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   frontend:
     build:

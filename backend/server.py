@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, status, WebSocket, WebSocketDisconnect, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pymongo import MongoClient
@@ -38,6 +38,39 @@ events_collection = db.events
 
 # Security
 security = HTTPBearer()
+
+# ---- Ingest API key guard ----
+_ingest_keys: Optional[set] = None
+
+def _load_ingest_keys() -> set:
+    """Load valid ingest API keys from INGEST_API_KEYS env var (comma-separated)."""
+    global _ingest_keys
+    if _ingest_keys is None:
+        raw = os.getenv("INGEST_API_KEYS", "")
+        _ingest_keys = {k.strip() for k in raw.split(",") if k.strip()}
+    return _ingest_keys
+
+
+def require_ingest_key(x_api_key: Optional[str] = None) -> str:
+    """
+    Validates X-API-Key header against INGEST_API_KEYS.
+    Call this inside an endpoint body after extracting the header via Header().
+    Raises HTTPException 401 on failure.
+    """
+    keys = _load_ingest_keys()
+    if not keys:
+        logger.error("INGEST_API_KEYS is not set; /ingest/event is locked down")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ingest endpoint has no API keys configured",
+        )
+    if not x_api_key or x_api_key not in keys:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-API-Key",
+        )
+    return x_api_key
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -547,7 +580,12 @@ async def import_telemetry(
 
 # ---- /ingest/event endpoint ----
 @app.post("/ingest/event", response_model=IngestEventResponse)
-async def ingest_event(request_data: IngestEventRequest):
+async def ingest_event(
+    request_data: IngestEventRequest,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    # Validate API key — raises 401 or 503 on failure
+    require_ingest_key(x_api_key)
     """
     Ingest telemetry events from an external project.
     Persists raw events, then kicks off async detection.

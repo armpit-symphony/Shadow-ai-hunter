@@ -16,6 +16,23 @@
 
 ---
 
+## API Key Configuration
+
+`POST /ingest/event` requires a valid `X-API-Key` header.
+
+Set `INGEST_API_KEYS` as a comma-separated list of valid keys:
+
+```bash
+# docker-compose.env or .env
+INGEST_API_KEYS=key-for-sparkbot,key-for-project-b,key-for-project-c
+```
+
+> **No keys configured = endpoint returns 503** — this is intentional to prevent accidental open access.
+
+`GET /ingest/status/{job_id}` is **unauthenticated** — polling only, no write.
+
+---
+
 ## Startup
 
 ```bash

@@ -203,19 +203,67 @@ async def health_check():
 
 # Dashboard endpoints
 @app.get("/api/dashboard/stats", response_model=DashboardStats)
-async def get_dashboard_stats(current_user: User = Depends(require_viewer)):
-    """Get overall dashboard statistics"""
+async def get_dashboard_stats(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_token: Optional[str] = Header(None, alias="Authorization"),
+):
+    """
+    Get dashboard statistics. When X-API-Key is provided, returns stats
+    scoped to the key's bound project. JWT Bearer token users see global stats.
+    """
+    bound_project = None
+
+    # Authenticate
+    if x_api_key:
+        try:
+            require_ingest_key(x_api_key)
+            bound_project = _get_project_for_key(x_api_key)
+        except HTTPException:
+            raise
+    elif x_token:
+        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=x_token.replace("Bearer ", ""))
+        get_current_active_user(credentials)
+    else:
+        raise HTTPException(status_code=401, detail="Missing authentication")
+
     try:
-        total_devices = devices_collection.count_documents({})
-        high_risk_devices = devices_collection.count_documents({"ai_risk_score": {"$gte": 0.7}})
-        active_threats = alerts_collection.count_documents({"resolved": False, "severity": {"$in": ["high", "critical"]}})
-        total_scans = scans_collection.count_documents({})
+        if bound_project:
+            # Build project scope filter for collections that carry project identity
+            project_filter = {
+                "$or": [
+                    {"source_project": bound_project},
+                    {"project_id": bound_project},
+                ]
+            }
+            # For scans, scope via detection records for this project
+            detection_ids = [
+                d["_id"] for d in
+                db["detections"].find({"source_project": bound_project}, {"_id": 1})
+            ]
+            scan_filter = {"_id": {"$in": detection_ids}} if detection_ids else {"_id": None}
+
+            total_devices = devices_collection.count_documents(project_filter)
+            high_risk_devices = devices_collection.count_documents(
+                {**project_filter, "ai_risk_score": {"$gte": 0.7}}
+            )
+            active_threats = alerts_collection.count_documents(
+                {**project_filter, "resolved": False, "severity": {"$in": ["high", "critical"]}}
+            )
+            total_scans = scans_collection.count_documents(scan_filter)
+        else:
+            # JWT path — global stats (existing behavior)
+            total_devices = devices_collection.count_documents({})
+            high_risk_devices = devices_collection.count_documents({"ai_risk_score": {"$gte": 0.7}})
+            active_threats = alerts_collection.count_documents({"resolved": False, "severity": {"$in": ["high", "critical"]}})
+            total_scans = scans_collection.count_documents({})
+
+        # Policies are global infrastructure — always unscoped
         ai_services_blocked = policies_collection.count_documents({"rule_type": "block", "enabled": True})
-        
-        # Calculate compliance score based on policies and threats
+
+        # Calculate compliance score based on scoped metrics
         compliance_score = max(0.0, 100.0 - (active_threats * 10) - (high_risk_devices * 5))
         compliance_score = min(100.0, compliance_score)
-        
+
         return DashboardStats(
             total_devices=total_devices,
             high_risk_devices=high_risk_devices,

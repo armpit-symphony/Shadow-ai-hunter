@@ -410,6 +410,60 @@ async def get_alerts(
         logger.error(f"Error getting alerts: {e}")
         raise HTTPException(status_code=500, detail="Failed to get alerts")
 
+
+@app.post("/api/alerts/{alert_id}/retry-notification")
+async def retry_alert_notification(
+    alert_id: str,
+    x_token: Optional[str] = Header(None, alias="Authorization"),
+):
+    """
+    Manually retry webhook notification delivery for a specific alert.
+    Operator-only (JWT analyst/admin). API-key callers are not permitted.
+    Only alerts with high or critical severity are eligible for retry.
+    """
+    # JWT required — analyst or admin role
+    if not x_token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    credentials = HTTPAuthorizationCredentials(
+        scheme="Bearer",
+        credentials=x_token.replace("Bearer ", ""),
+    )
+    get_current_active_user(credentials)
+
+    # Load alert
+    alert = alerts_collection.find_one({"_id": alert_id})
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    # Eligibility: only high/critical severity; import here to avoid top-level dependency
+    from workers import notifications as notifications_mod
+    if not notifications_mod.should_notify(alert.get("severity", "")):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Alert severity '{alert.get('severity')}' is not eligible for notification. "
+                   "Only 'high' or 'critical' alerts can be retried.",
+        )
+
+    # Fire webhook via existing path
+    sent, error = notifications_mod.send_alert_webhook(alert)
+
+    # Update status fields on the alert record
+    from workers.models import update_alert_notification_status
+    update_alert_notification_status(
+        alert_id=alert_id,
+        notification_attempted=True,
+        notification_sent=sent,
+        notification_error=error,
+    )
+
+    return {
+        "alert_id": alert_id,
+        "notification_sent": sent,
+        "notification_error": error,
+        "message": "Notification retry succeeded" if sent else "Notification retry failed",
+    }
+
+
 @app.get("/api/policies")
 async def get_policies(
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),

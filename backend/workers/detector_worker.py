@@ -249,6 +249,13 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
                 persist_alert(alert)
                 logger.info(f"[{scan_id}] Created alert: {alert['_id']} (severity={sev})")
 
+                # Outbound notification — fire-and-forget, never blocks
+                from workers.notifications import notify_if_high_severity
+                try:
+                    notify_if_high_severity(alert)
+                except Exception:
+                    logger.exception(f"[{scan_id}] Unexpected error in alert notification")
+
         # ---- 4. Update detection record to completed ----
         update_detection_completed(
             scan_id=scan_id,

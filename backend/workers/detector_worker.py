@@ -249,11 +249,16 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
                 persist_alert(alert)
                 logger.info(f"[{scan_id}] Created alert: {alert['_id']} (severity={sev})")
 
+                # Forward HIGH/CRITICAL alerts to AI Guardian — fire-and-forget
+                from workers.guardian_client import forward_alert_to_guardian
+                forward_alert_to_guardian(alert)
+
                 # Outbound notification — fire-and-forget, never blocks
                 from workers.notifications import notify_if_high_severity
                 from workers.models import update_alert_notification_status
                 try:
-                    sent, error = notify_if_high_severity(alert)
+                    result = notify_if_high_severity(alert)
+                    sent, error = (result, None) if isinstance(result, bool) else result
                     update_alert_notification_status(
                         alert_id=alert["_id"],
                         notification_attempted=True,

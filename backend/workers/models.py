@@ -43,6 +43,7 @@ def get_collection(name: str) -> Collection:
 DETECTIONS_COL = "detections"
 FINDINGS_COL = "findings"
 ALERTS_COL = "alerts"
+USAGE_RECORDS_COL = "usage_records"
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +249,30 @@ def ensure_indexes() -> None:
     db[ALERTS_COL].create_index([("source_project", ASCENDING)])
     db[ALERTS_COL].create_index([("project_id", ASCENDING)])
     db[ALERTS_COL].create_index([("created_at", DESCENDING)])
-    db[ALERTS_COL].create_index([("severity", ASCENDING)])
 
-    logger.info("detections + findings + alerts indexes ensured")
+    # usage_records indexes
+    db[USAGE_RECORDS_COL].create_index(
+        [("project_id", ASCENDING), ("date_bucket", ASCENDING)],
+        unique=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Usage metering
+# ---------------------------------------------------------------------------
+def upsert_usage_record(project_id: str, events_count: int = 1) -> None:
+    """
+    Atomically increment usage counters for a project on the current UTC date bucket.
+    Creates the record if it does not exist (upsert).
+    """
+    col = get_collection(USAGE_RECORDS_COL)
+    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    col.update_one(
+        {"project_id": project_id, "date_bucket": today},
+        {
+            "$inc": {"events_ingested": events_count, "requests_count": 1},
+            "$set": {"updated_at": datetime.utcnow()},
+            "$setOnInsert": {"created_at": datetime.utcnow()},
+        },
+        upsert=True,
+    )

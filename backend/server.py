@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, status, WebSocket, WebSocketDisconnect, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pymongo import MongoClient
+from pymongo import MongoClient, ASCENDING
 from pydantic import BaseModel, model_validator
 from typing import List, Dict, Optional, Any
 import os
@@ -122,6 +122,12 @@ async def lifespan(app: FastAPI):
         events_collection.create_index("source_project")
         events_collection.create_index("detection_status")
         events_collection.create_index("created_at")
+        # usage_records: atomic per-project daily counter
+        from workers.models import USAGE_RECORDS_COL
+        db[USAGE_RECORDS_COL].create_index(
+            [("project_id", ASCENDING), ("date_bucket", ASCENDING)],
+            unique=True,
+        )
         # Initialize api_keys collection
         try:
             from workers import api_keys as mongo_keys
@@ -995,6 +1001,13 @@ async def ingest_event(
         normalized_events.append(normalized)
 
     logger.info(f"[{scan_id}] Ingested {len(event_ids)} events from project '{project}'")
+
+    # Update usage metering — atomic upsert per project per UTC day
+    try:
+        from workers.models import upsert_usage_record
+        upsert_usage_record(project, events_count=len(event_ids))
+    except Exception as exc:
+        logger.warning(f"[{scan_id}] Failed to update usage record: {exc}")
 
     # ---- 2. Kick off detection via RQ worker (primary) ----
     # Fallback runs only in dev/local mode (ENABLE_FALLBACK=true).

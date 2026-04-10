@@ -111,6 +111,9 @@ def require_ingest_key(x_api_key: Optional[str] = None) -> str:
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Shadow AI Hunter Backend...")
+    # Initialize auth — must be done before any JWT-protected endpoint is called
+    from auth import init_db
+    init_db(users_collection)
     # Initialize collections with indexes
     try:
         scans_collection.create_index("timestamp")
@@ -1109,6 +1112,48 @@ async def create_api_key(
     except Exception as e:
         logger.error(f"Error creating API key: {e}")
         raise HTTPException(status_code=500, detail="Failed to create API key")
+
+
+@app.delete("/admin/api-keys/{api_key}")
+async def revoke_api_key(
+    api_key: str,
+    current_user: User = Depends(require_analyst),
+):
+    """
+    Revoke an API key by marking it inactive.
+    Operator-only (requires analyst JWT). The key is soft-revoked (active=False)
+    and immediately invalidated from the cache. The document is retained for audit.
+    """
+    from workers import api_keys as mongo_keys
+    try:
+        revoked = mongo_keys.revoke_api_key(api_key)
+        if not revoked:
+            raise HTTPException(status_code=404, detail="API key not found")
+        return {"message": "API key revoked", "api_key": api_key[:8] + "..."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error revoking API key: {e}")
+        raise HTTPException(status_code=500, detail="Failed to revoke API key")
+
+
+@app.get("/admin/api-keys")
+async def list_api_keys(
+    project_id: Optional[str] = None,
+    current_user: User = Depends(require_analyst),
+):
+    """
+    List API key records for a project (or all projects if project_id is omitted).
+    Operator-only (requires analyst JWT). Only safe management fields are returned —
+    the full plaintext key is never exposed.
+    """
+    from workers import api_keys as mongo_keys
+    try:
+        keys = mongo_keys.list_api_keys(project_id=project_id)
+        return {"api_keys": keys}
+    except Exception as e:
+        logger.error(f"Error listing API keys: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list API keys")
 
 
 if __name__ == "__main__":

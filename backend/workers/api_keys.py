@@ -10,7 +10,7 @@ import os
 import secrets
 import time
 import logging
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from datetime import datetime
 
 from pymongo.collection import Collection
@@ -64,6 +64,45 @@ def store_api_key(project_id: str, created_by: Optional[str] = None) -> dict:
     # Invalidate cache so the new key is immediately valid
     _invalidate_cache()
     return doc
+
+
+def revoke_api_key(api_key: str) -> bool:
+    """
+    Soft-revoke an API key by setting active=False.
+    Returns True if the key was found and revoked; False if it did not exist.
+    The key remains in the collection for audit purposes.
+    """
+    col = _get_api_keys_collection()
+    result = col.update_one(
+        {"api_key": api_key},
+        {"$set": {"active": False, "revoked_at": datetime.utcnow()}}
+    )
+    if result.matched_count > 0:
+        logger.info(f"API key revoked: {api_key[:8]}...")
+        _invalidate_cache()
+        return True
+    return False
+
+
+def list_api_keys(project_id: Optional[str] = None) -> List[dict]:
+    """
+    Return API key records for a specific project, or all projects if project_id is None.
+    Only safe/management fields are returned — the full plaintext key is never exposed.
+    """
+    col = _get_api_keys_collection()
+    query = {"project_id": project_id} if project_id else {}
+    docs = col.find(query).sort("created_at", -1)
+    return [
+        {
+            "key_prefix": d["api_key"][:8] + "...",
+            "project_id": d["project_id"],
+            "active": d.get("active", True),
+            "created_at": d.get("created_at"),
+            "created_by": d.get("created_by"),
+            "revoked_at": d.get("revoked_at"),
+        }
+        for d in docs
+    ]
 
 
 def get_valid_keys() -> Dict[str, dict]:

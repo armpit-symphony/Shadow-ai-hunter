@@ -113,6 +113,21 @@ def calculate_risk_level(findings: List[Dict]) -> str:
     return "low"
 
 
+def calculate_risk_score(findings: List[Dict]) -> int:
+    """
+    Compute a numeric risk score (0–100) from findings.
+    Weighted by severity: critical=10, high=7, medium=4, low=1.
+    Normalised so a single critical finding gives ~80, maxed at 100.
+    """
+    if not findings:
+        return 0
+    weights = {"critical": 10, "high": 7, "medium": 4, "low": 1}
+    total = sum(weights.get(f.get("severity", "low").lower(), 1) for f in findings)
+    # A single critical → 10; 12.5 critical maxes at 100
+    score = min(100, int((total / 12.5) * 100))
+    return score
+
+
 def generate_compliance_summary(findings: List[Dict]) -> Dict:
     """Summarise compliance impact by category."""
     categories: Dict[str, int] = {}
@@ -196,7 +211,7 @@ def _remediation_for_finding(finding: Dict) -> str:
         )
     if "user_agent" in ftype:
         return (
-            f"Review client software on {indicator} — unauthorized AI tool detected via user-agent. "
+            f"Review client software on {indicator} - unauthorized AI tool detected via user-agent. "
             "Update acceptable-use policy and enforce via endpoint controls."
         )
     if sev == "critical":
@@ -230,6 +245,7 @@ def generate_json_report(scan_id: str, scan_data: Dict, findings: List[Dict]) ->
             "total_events": scan_data.get("events_processed", scan_data.get("devices_found", 0)),
             "findings_count": len(enriched_findings),
             "risk_level": calculate_risk_level(enriched_findings),
+            "risk_score": calculate_risk_score(enriched_findings),
             "devices_with_findings": scan_data.get("devices_with_findings", 0),
         },
         "scan_details": {k: str(v) for k, v in scan_data.items() if k != "_id"},
@@ -239,7 +255,7 @@ def generate_json_report(scan_id: str, scan_data: Dict, findings: List[Dict]) ->
     }
     if os.getenv("REPORT_MASK_PII", "false").lower() == "true":
         report = _mask_report(report)
-    # Integrity hash (covers findings only — stable even if metadata changes)
+    # Integrity hash (covers findings only - stable even if metadata changes)
     report["integrity_hash"] = hashlib.sha256(
         json.dumps(enriched_findings, sort_keys=True, default=str).encode()
     ).hexdigest()
@@ -260,7 +276,7 @@ def generate_pdf_content(report: Dict) -> bytes:
                 self.set_font("Helvetica", "B", 10)
                 self.set_fill_color(30, 30, 60)
                 self.set_text_color(255, 255, 255)
-                self.cell(0, 10, "Shadow AI Hunter — Enterprise Security Report", ln=True,
+                self.cell(0, 10, "Shadow AI Hunter - Enterprise Security Report", ln=True,
                           fill=True, align="C")
                 self.set_text_color(0, 0, 0)
                 self.ln(2)
@@ -269,7 +285,7 @@ def generate_pdf_content(report: Dict) -> bytes:
                 self.set_y(-15)
                 self.set_font("Helvetica", "I", 8)
                 self.set_text_color(128, 128, 128)
-                self.cell(0, 10, f"Page {self.page_no()} — CONFIDENTIAL", align="C")
+                self.cell(0, 10, f"Page {self.page_no()} - CONFIDENTIAL", align="C")
 
         pdf = _PDF()
         pdf.set_auto_page_break(auto=True, margin=15)
@@ -316,6 +332,11 @@ def generate_pdf_content(report: Dict) -> bytes:
         pdf.set_text_color(255, 255, 255)
         pdf.cell(100, 7, risk_level, border=1, ln=True, fill=True)
         pdf.set_text_color(0, 0, 0)
+
+        # Risk score row
+        risk_score = summary.get("risk_score", 0)
+        pdf.cell(90, 7, "Risk Score", border=1)
+        pdf.cell(100, 7, f"{risk_score} / 100", border=1, ln=True)
         pdf.ln(5)
 
         # ── Recommendations ──────────────────────────────────────────────────
@@ -406,7 +427,7 @@ def generate_pdf_content(report: Dict) -> bytes:
 def _text_fallback(report: Dict) -> bytes:
     """Plain-text report fallback when fpdf2 is unavailable."""
     lines = [
-        "Shadow AI Hunter — Security Report",
+        "Shadow AI Hunter - Security Report",
         "=" * 60,
         f"Report ID: {report.get('report_id')}",
         f"Generated: {report.get('generated_at')}",
@@ -422,7 +443,7 @@ def _text_fallback(report: Dict) -> bytes:
     lines += ["", "Findings", "-" * 40]
     for f in report.get("findings", []):
         lines.append(
-            f"  [{f.get('severity', 'N/A').upper()}] {f.get('type')} — {f.get('indicator')}"
+            f"  [{f.get('severity', 'N/A').upper()}] {f.get('type')} - {f.get('indicator')}"
         )
     return "\n".join(lines).encode("utf-8")
 
@@ -445,11 +466,30 @@ def create_report(scan_id: str, scan_data: Dict, findings: List[Dict], format: s
             "report_id": report["report_id"],
         }
     elif format == "pdf":
+        # Replace em dash with ASCII dash for Helvetica compatibility
+        def _clean(s):
+            if isinstance(s, str):
+                return s.replace('\u2014', '-').replace('\u2013', '-')
+            return s
+
+        def _clean_dict(d):
+            return {k: _clean(v) if isinstance(v, str) else v for k, v in d.items()}
+
+        report = _clean_dict(report)
+        if report.get("summary"):
+            report["summary"] = _clean_dict(report["summary"])
+        if report.get("findings"):
+            report["findings"] = [_clean_dict(f) if isinstance(f, dict) else f for f in report["findings"]]
+        if report.get("recommendations"):
+            report["recommendations"] = [_clean(r) if isinstance(r, str) else r for r in report["recommendations"]]
+        if report.get("compliance_summary"):
+            report["compliance_summary"] = _clean_dict(report["compliance_summary"])
+
         pdf_bytes = generate_pdf_content(report)
         return {
             "scan_id": scan_id,
             "format": "pdf",
-            "content": None,  # binary — caller must handle separately
+            "content": None,  # binary - caller must handle separately
             "pdf_bytes": pdf_bytes,
             "report_id": report["report_id"],
             "size_bytes": len(pdf_bytes),

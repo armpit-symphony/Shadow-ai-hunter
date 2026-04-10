@@ -2281,13 +2281,41 @@ function ScanDetailPage() {
 
   const exportReport = async (fmt) => {
     if (!report) return;
-    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `shadow-ai-audit-${(job.job_id || job._id || 'report').slice(0, 8)}.${fmt}`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const base = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
+    const token = localStorage.getItem('shadow_token');
+    const filename = `shadow-ai-audit-${(job.job_id || job._id || 'report').slice(0, 8)}.${fmt}`;
+
+    if (fmt === 'pdf') {
+      const reportId = report.report_id || report.id || job.job_id || job._id;
+      try {
+        const r = await fetch(`${base}/api/reports/${reportId}/export`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ fmt: 'pdf' }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        alert('PDF export failed: ' + (e?.message || 'unknown error'));
+      }
+    } else {
+      const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
   };
 
   return (
@@ -2405,14 +2433,20 @@ function ScanDetailPage() {
                   <div className="flex items-center justify-between mb-4">
                     <div>
                       <p className="text-xs text-gray-500 mb-1">Overall Risk Level</p>
-                      <span className={`text-lg font-bold px-3 py-1 rounded-full ${
-                        report.summary?.risk_level === 'critical' ? 'bg-red-100 text-red-700' :
-                        report.summary?.risk_level === 'high' ? 'bg-orange-100 text-orange-700' :
-                        report.summary?.risk_level === 'medium' ? 'bg-yellow-100 text-yellow-700' :
-                        'bg-green-100 text-green-700'
-                      }`}>
-                        {(report.summary?.risk_level || 'unknown').toUpperCase()}
-                      </span>
+                      <div className="flex items-center gap-3">
+                        <span className={`text-lg font-bold px-3 py-1 rounded-full ${
+                          report.summary?.risk_level === 'critical' ? 'bg-red-100 text-red-700' :
+                          report.summary?.risk_level === 'high' ? 'bg-orange-100 text-orange-700' :
+                          report.summary?.risk_level === 'medium' ? 'bg-yellow-100 text-yellow-700' :
+                          'bg-green-100 text-green-700'
+                        }`}>
+                          {(report.summary?.risk_level || 'unknown').toUpperCase()}
+                        </span>
+                        <div className="text-xs">
+                          <span className="font-bold text-gray-900">{report.summary?.risk_score ?? 0}</span>
+                          <span className="text-gray-400"> / 100</span>
+                        </div>
+                      </div>
                     </div>
                     <div className="flex gap-2">
                       <button onClick={() => exportReport('json')}
@@ -2420,7 +2454,7 @@ function ScanDetailPage() {
                           bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100">
                         <FileText className="w-3.5 h-3.5" /> Export JSON
                       </button>
-                      <button onClick={() => exportReport('json')}
+                      <button onClick={() => exportReport('pdf')}
                         className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-700
                           bg-red-50 border border-red-200 rounded-lg hover:bg-red-100">
                         <FileText className="w-3.5 h-3.5" /> Export PDF

@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, status, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+import io
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pymongo import MongoClient
@@ -1216,7 +1217,11 @@ async def generate_report(
 ):
     """Generate a security report for a completed scan."""
     try:
-        scan = scans_collection.find_one({"_id": scan_id})
+        # Try ObjectId first (auto-generated), fall back to raw string (custom IDs)
+        try:
+            scan = scans_collection.find_one({"_id": ObjectId(scan_id)})
+        except Exception:
+            scan = scans_collection.find_one({"_id": scan_id})
         if not scan:
             raise HTTPException(status_code=404, detail="Scan not found")
 
@@ -1286,19 +1291,97 @@ async def get_report(
 ):
     """
     Fetch a specific report by ID.
-    Returns structured JSON findings, severity levels, evidence,
-    and remediation text.
+    Query param fmt=pdf → returns application/pdf download.
+    Otherwise returns structured JSON.
     """
     try:
-        doc = reports_collection.find_one({"_id": report_id}, {"_id": 0})
+        try:
+            doc = reports_collection.find_one({"_id": ObjectId(report_id)}, {"_id": 0})
+        except Exception:
+            doc = reports_collection.find_one({"_id": report_id}, {"_id": 0})
         if not doc:
             raise HTTPException(status_code=404, detail="Report not found")
-        return doc
+
+        # Re-build full report content for JSON response
+        try:
+            from workers.report_engine import create_report
+            scan_id = doc.get("scan_id", report_id)
+            findings = list(alerts_collection.find({"scan_id": scan_id}, {"_id": 0}))
+            try:
+                scan_doc = scans_collection.find_one({"_id": ObjectId(scan_id)})
+            except Exception:
+                scan_doc = scans_collection.find_one({"_id": scan_id})
+            if not scan_doc:
+                scan_doc = {"_id": scan_id, "scan_id": scan_id}
+            report_content = create_report(scan_id, scan_doc, findings, format="json")
+            return {**doc, "report": report_content}
+        except Exception as e:
+            logger.error(f"Error rebuilding report content for {report_id}: {e}")
+            return doc
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error fetching report {report_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch report")
+
+
+class _ExportFmt(BaseModel):
+    fmt: str = "pdf"
+
+
+@app.post("/api/reports/{report_id}/export")
+async def export_report(
+    report_id: str,
+    body: _ExportFmt = _ExportFmt(),
+    current_user: User = Depends(require_viewer),
+):
+    """
+    Export a report as PDF or JSON.
+    POST /api/reports/{report_id}/export  body: {"fmt": "pdf"}
+    """
+    try:
+        try:
+            doc = reports_collection.find_one({"_id": ObjectId(report_id)}, {"_id": 0})
+        except Exception:
+            doc = reports_collection.find_one({"_id": report_id}, {"_id": 0})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Report not found")
+        scan_id = doc.get("scan_id", report_id)
+        findings = list(alerts_collection.find({"scan_id": scan_id}, {"_id": 0}))
+        try:
+            scan_doc = scans_collection.find_one({"_id": ObjectId(scan_id)})
+        except Exception:
+            scan_doc = scans_collection.find_one({"_id": scan_id})
+        if not scan_doc:
+            scan_doc = {"_id": scan_id, "scan_id": scan_id}
+
+        if body.fmt == "pdf":
+            try:
+                from workers.report_engine import create_report, generate_pdf_content
+                report_data = create_report(scan_id, scan_doc, findings, format="pdf")
+                # create_report returns {"content": None, "pdf_bytes": <bytes>} for PDF format
+                pdf_bytes = report_data.get("pdf_bytes")
+                if not pdf_bytes:
+                    # Fallback: build content dict and generate
+                    content = report_data.get("content") or report_data
+                    pdf_bytes = generate_pdf_content(content)
+                return StreamingResponse(
+                    io.BytesIO(pdf_bytes),
+                    media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="shadow-ai-audit-{report_id[:8]}.pdf"'},
+                )
+            except Exception as e:
+                logger.error(f"PDF export error for {report_id}: {e}")
+                raise HTTPException(status_code=500, detail=f"PDF export failed: {e}")
+        else:
+            from workers.report_engine import create_report
+            report_content = create_report(scan_id, scan_doc, findings, format="json")
+            return {**doc, "report": report_content}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting report {report_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to export report")
 
 
 # ---------------------------------------------------------------------------

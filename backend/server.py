@@ -869,10 +869,49 @@ async def get_ingest_status(
         created_at=None,
         completed_at=None,
     )
-async def get_scans(limit: int = 50, current_user: User = Depends(require_viewer)):
-    """Get scan history"""
+@app.get("/api/scans")
+async def get_scans(
+    limit: int = 50,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_token: Optional[str] = Header(None, alias="Authorization"),
+):
+    """
+    Get scan history. When X-API-Key is provided, returns only scans that belong
+    to the key's bound project. JWT Bearer token users see all scans.
+    """
+    query = {}
+
+    # API key path — project-scoped access
+    if x_api_key:
+        try:
+            require_ingest_key(x_api_key)
+            bound_project = _get_project_for_key(x_api_key)
+        except HTTPException:
+            raise
+    elif x_token:
+        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=x_token.replace("Bearer ", ""))
+        get_current_active_user(credentials)
+    else:
+        raise HTTPException(status_code=401, detail="Missing authentication")
+
+    if bound_project:
+        # Scans from the ingest pipeline: their _id matches a detection record.
+        # We scope by finding detection records for this project and using those scan_ids.
+        detection_ids = [
+            d["_id"] for d in
+            db["detections"].find(
+                {"source_project": bound_project},
+                {"_id": 1}
+            )
+        ]
+        if detection_ids:
+            query["_id"] = {"$in": detection_ids}
+        else:
+            # No detection records for this project yet — return empty
+            return {"scans": []}
+
     try:
-        scans = list(scans_collection.find({}, {"_id": 0}).sort("timestamp", -1).limit(limit))
+        scans = list(scans_collection.find(query, {"_id": 0}).sort("timestamp", -1).limit(limit))
         return {"scans": scans}
     except Exception as e:
         logger.error(f"Error getting scans: {e}")
@@ -880,12 +919,40 @@ async def get_scans(limit: int = 50, current_user: User = Depends(require_viewer
 
 
 @app.get("/api/scans/{scan_id}")
-async def get_scan(scan_id: str, current_user: User = Depends(require_viewer)):
-    """Get specific scan details"""
+async def get_scan(
+    scan_id: str,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_token: Optional[str] = Header(None, alias="Authorization"),
+):
+    """
+    Get specific scan details. When X-API-Key is provided, returns the scan only
+    if it belongs to the key's bound project. JWT Bearer token users see all scans.
+    """
+    # Authenticate
+    if x_api_key:
+        try:
+            require_ingest_key(x_api_key)
+            bound_project = _get_project_for_key(x_api_key)
+        except HTTPException:
+            raise
+    elif x_token:
+        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=x_token.replace("Bearer ", ""))
+        get_current_active_user(credentials)
+        bound_project = None
+    else:
+        raise HTTPException(status_code=401, detail="Missing authentication")
+
     try:
         scan = scans_collection.find_one({"_id": scan_id}, {"_id": 0})
         if not scan:
             raise HTTPException(status_code=404, detail="Scan not found")
+
+        if bound_project:
+            # For ingest pipeline scans, check the detection record's source_project
+            detection = db["detections"].find_one({"_id": scan_id})
+            if not detection or detection.get("source_project") != bound_project:
+                raise HTTPException(status_code=404, detail="Scan not found")
+
         return {"scan": scan}
     except HTTPException:
         raise

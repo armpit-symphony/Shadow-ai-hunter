@@ -229,20 +229,78 @@ async def get_dashboard_stats(current_user: User = Depends(require_viewer)):
         raise HTTPException(status_code=500, detail="Failed to get dashboard statistics")
 
 @app.get("/api/devices")
-async def get_devices(current_user: User = Depends(require_viewer)):
-    """Get all detected devices"""
+async def get_devices(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_token: Optional[str] = Header(None, alias="Authorization"),
+):
+    """
+    Get all detected devices. When X-API-Key is provided, results are scoped
+    to the key's bound project. JWT Bearer token users see all devices.
+    """
+    query = {}
+    bound_project = None
+
+    # API key path — project-scoped access
+    if x_api_key:
+        try:
+            require_ingest_key(x_api_key)
+            bound_project = _get_project_for_key(x_api_key)
+        except HTTPException:
+            raise  # re-raise 401/503 from require_ingest_key
+    elif x_token:
+        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=x_token.replace("Bearer ", ""))
+        get_current_active_user(credentials)
+    else:
+        raise HTTPException(status_code=401, detail="Missing authentication")
+
+    if bound_project:
+        query["$or"] = [
+            {"source_project": bound_project},
+            {"project_id": bound_project},
+        ]
+
     try:
-        devices = list(devices_collection.find({}, {"_id": 0}).sort("ai_risk_score", -1))
+        devices = list(devices_collection.find(query, {"_id": 0}).sort("ai_risk_score", -1))
         return {"devices": devices}
     except Exception as e:
         logger.error(f"Error getting devices: {e}")
         raise HTTPException(status_code=500, detail="Failed to get devices")
 
 @app.get("/api/alerts")
-async def get_alerts(limit: int = 50, current_user: User = Depends(require_viewer)):
-    """Get recent alerts"""
+async def get_alerts(
+    limit: int = 50,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_token: Optional[str] = Header(None, alias="Authorization"),
+):
+    """
+    Get recent alerts. When X-API-Key is provided, results are scoped to
+    the key's bound project. JWT Bearer token users see all alerts.
+    """
+    query = {}
+    bound_project = None
+
+    # API key path — project-scoped access
+    if x_api_key:
+        try:
+            require_ingest_key(x_api_key)
+            bound_project = _get_project_for_key(x_api_key)
+        except HTTPException:
+            raise  # re-raise 401/503 from require_ingest_key
+    elif x_token:
+        # JWT path — existing behavior, require valid viewer token
+        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=x_token.replace("Bearer ", ""))
+        get_current_active_user(credentials)
+    else:
+        raise HTTPException(status_code=401, detail="Missing authentication")
+
+    if bound_project:
+        query["$or"] = [
+            {"source_project": bound_project},
+            {"project_id": bound_project},
+        ]
+
     try:
-        alerts = list(alerts_collection.find({}, {"_id": 0}).sort("created_at", -1).limit(limit))
+        alerts = list(alerts_collection.find(query, {"_id": 0}).sort("created_at", -1).limit(limit))
         return {"alerts": alerts}
     except Exception as e:
         logger.error(f"Error getting alerts: {e}")

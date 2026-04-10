@@ -154,6 +154,7 @@ class PolicyRule(BaseModel):
     actions: List[str]
     enabled: bool = True
     created_at: Optional[datetime] = None
+    source_project: Optional[str] = None
 
 class Alert(BaseModel):
     title: str
@@ -355,21 +356,72 @@ async def get_alerts(
         raise HTTPException(status_code=500, detail="Failed to get alerts")
 
 @app.get("/api/policies")
-async def get_policies(current_user: User = Depends(require_viewer)):
-    """Get all policy rules"""
+async def get_policies(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_token: Optional[str] = Header(None, alias="Authorization"),
+):
+    """
+    Get all policy rules. When X-API-Key is provided, returns only policies
+    that belong to the key's bound project. JWT Bearer users see all policies.
+    """
+    query = {}
+
+    if x_api_key:
+        try:
+            require_ingest_key(x_api_key)
+            bound_project = _get_project_for_key(x_api_key)
+        except HTTPException:
+            raise
+    elif x_token:
+        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=x_token.replace("Bearer ", ""))
+        get_current_active_user(credentials)
+    else:
+        raise HTTPException(status_code=401, detail="Missing authentication")
+
+    if bound_project:
+        query["$or"] = [
+            {"source_project": bound_project},
+            {"project_id": bound_project},
+        ]
+
     try:
-        policies = list(policies_collection.find({}, {"_id": 0}).sort("created_at", -1))
+        policies = list(policies_collection.find(query, {"_id": 0}).sort("created_at", -1))
         return {"policies": policies}
     except Exception as e:
         logger.error(f"Error getting policies: {e}")
         raise HTTPException(status_code=500, detail="Failed to get policies")
 
 @app.post("/api/policies")
-async def create_policy(policy: PolicyRule, current_user: User = Depends(require_analyst)):
-    """Create a new policy rule"""
+async def create_policy(
+    policy: PolicyRule,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_token: Optional[str] = Header(None, alias="Authorization"),
+):
+    """
+    Create a new policy rule. When X-API-Key is provided, the policy is tagged
+    with the key's bound project. JWT Bearer users must be analysts.
+    """
+    # Authenticate
+    if x_api_key:
+        try:
+            require_ingest_key(x_api_key)
+            bound_project = _get_project_for_key(x_api_key)
+        except HTTPException:
+            raise
+    elif x_token:
+        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=x_token.replace("Bearer ", ""))
+        get_current_active_user(credentials)
+        bound_project = None
+    else:
+        raise HTTPException(status_code=401, detail="Missing authentication")
+
     try:
-        policy.created_at = datetime.utcnow()
-        result = policies_collection.insert_one(policy.dict())
+        policy_dict = policy.dict()
+        policy_dict["created_at"] = datetime.utcnow()
+        # Tag with source_project if created via API key
+        if bound_project:
+            policy_dict["source_project"] = bound_project
+        result = policies_collection.insert_one(policy_dict)
         if result.inserted_id:
             return {"message": "Policy created successfully", "id": str(result.inserted_id)}
         raise HTTPException(status_code=500, detail="Failed to create policy")

@@ -411,6 +411,47 @@ async def get_alerts(
         raise HTTPException(status_code=500, detail="Failed to get alerts")
 
 
+@app.get("/api/alerts/{alert_id}")
+async def get_alert(
+    alert_id: str,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_token: Optional[str] = Header(None, alias="Authorization"),
+):
+    """
+    Get a single alert by ID.
+    JWT Bearer users can access any alert.
+    API-key callers can only access alerts belonging to their bound project.
+    Returns 404 if the alert does not exist or is not accessible.
+    """
+    if x_api_key:
+        try:
+            require_ingest_key(x_api_key)
+            bound_project = _get_project_for_key(x_api_key)
+        except HTTPException:
+            raise
+    elif x_token:
+        credentials = HTTPAuthorizationCredentials(
+            scheme="Bearer",
+            credentials=x_token.replace("Bearer ", ""),
+        )
+        get_current_active_user(credentials)
+        bound_project = None  # JWT users bypass project scoping
+    else:
+        raise HTTPException(status_code=401, detail="Missing authentication")
+
+    alert = alerts_collection.find_one({"_id": alert_id}, {"_id": 0})
+
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    # API-key callers: enforce project scope
+    if bound_project:
+        if alert.get("source_project") != bound_project and alert.get("project_id") != bound_project:
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+    return alert
+
+
 @app.post("/api/alerts/{alert_id}/retry-notification")
 async def retry_alert_notification(
     alert_id: str,

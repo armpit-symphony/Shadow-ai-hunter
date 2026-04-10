@@ -42,6 +42,7 @@ def get_collection(name: str) -> Collection:
 # ---------------------------------------------------------------------------
 DETECTIONS_COL = "detections"
 FINDINGS_COL = "findings"
+ALERTS_COL = "alerts"
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +102,46 @@ def create_finding_record(
         "metadata": metadata or {},
         "created_at": datetime.utcnow(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Alert document schema
+# ---------------------------------------------------------------------------
+def create_alert_record(
+    title: str,
+    description: str,
+    severity: str,
+    alert_type: str,
+    indicator: str,
+    project_id: Optional[str] = None,
+    source_project: Optional[str] = None,
+    detection_id: Optional[str] = None,
+    finding_type: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build an alert document before insertion."""
+    return {
+        "_id": str(uuid4()),
+        "title": title,
+        "description": description,
+        "severity": severity,               # critical | high | medium | low
+        "alert_type": alert_type,
+        "indicator": indicator,
+        "source_project": source_project,
+        "project_id": project_id,
+        "detection_id": detection_id,
+        "finding_type": finding_type,
+        "metadata": metadata or {},
+        "resolved": False,
+        "created_at": datetime.utcnow(),
+    }
+
+
+def persist_alert(alert: Dict[str, Any]) -> str:
+    """Insert an alert document. Returns the _id."""
+    col = get_collection(ALERTS_COL)
+    col.insert_one(alert)
+    return alert["_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -180,5 +221,12 @@ def ensure_indexes() -> None:
     db[FINDINGS_COL].create_index([("severity", ASCENDING)])
     db[FINDINGS_COL].create_index([("created_at", DESCENDING)])
     db[FINDINGS_COL].create_index([("type", ASCENDING)])
+    db[FINDINGS_COL].create_index([("project_id", ASCENDING)])
 
-    logger.info("detections + findings indexes ensured")
+    # alerts indexes
+    db[ALERTS_COL].create_index([("source_project", ASCENDING)])
+    db[ALERTS_COL].create_index([("project_id", ASCENDING)])
+    db[ALERTS_COL].create_index([("created_at", DESCENDING)])
+    db[ALERTS_COL].create_index([("severity", ASCENDING)])
+
+    logger.info("detections + findings + alerts indexes ensured")

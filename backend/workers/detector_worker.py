@@ -13,8 +13,10 @@ import json
 from workers.models import (
     create_detection_record,
     create_finding_record,
+    create_alert_record,
     persist_detection,
     persist_findings,
+    persist_alert,
     update_detection_completed,
     update_detection_failed,
     ensure_indexes,
@@ -217,6 +219,35 @@ def run_detection(scan_id: str, events: List[Dict]) -> Dict:
         if finding_docs:
             persist_findings(finding_docs)
             logger.info(f"[{scan_id}] Persisted {len(finding_docs)} findings")
+
+            # Create an alert for this detection if there are high-severity findings
+            top_finding = all_findings[0] if all_findings else None
+            if top_finding:
+                sev = top_finding.get("severity", "low")
+                indicator = top_finding.get("indicator", "")
+                service = top_finding.get("service") or "unknown"
+                alert = create_alert_record(
+                    title=f"Shadow AI Detected: {indicator} ({service})",
+                    description=(
+                        f"Detection scan {scan_id} found {len(all_findings)} "
+                        f"AI service contact(s) including {indicator}. "
+                        f"Risk score: {risk_score:.2f}."
+                    ),
+                    severity=sev,
+                    alert_type="ai_detection",
+                    indicator=indicator,
+                    source_project=project_id,
+                    project_id=project_id,
+                    detection_id=scan_id,
+                    finding_type=top_finding.get("type"),
+                    metadata={
+                        "findings_count": len(all_findings),
+                        "risk_score": risk_score,
+                        "events_processed": len(events),
+                    },
+                )
+                persist_alert(alert)
+                logger.info(f"[{scan_id}] Created alert: {alert['_id']} (severity={sev})")
 
         # ---- 4. Update detection record to completed ----
         update_detection_completed(

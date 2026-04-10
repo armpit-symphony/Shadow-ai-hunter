@@ -193,6 +193,11 @@ class Alert(BaseModel):
     created_at: Optional[datetime] = None
     resolved: bool = False
 
+
+class AlertUpdateRequest(BaseModel):
+    acknowledged: Optional[bool] = None
+    resolved: Optional[bool] = None
+
 class DashboardStats(BaseModel):
     total_devices: int
     high_risk_devices: int
@@ -450,6 +455,35 @@ async def get_alert(
             raise HTTPException(status_code=404, detail="Alert not found")
 
     return alert
+
+
+@app.patch("/api/alerts/{alert_id}")
+async def update_alert(
+    alert_id: str,
+    update_req: AlertUpdateRequest,
+    current_user: User = Depends(require_analyst),
+):
+    """
+    Update alert state (acknowledged / resolved).
+    Operator-only (JWT analyst/admin). API-key callers are not permitted.
+    """
+    existing = alerts_collection.find_one({"_id": alert_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    if update_req.acknowledged is None and update_req.resolved is None:
+        raise HTTPException(status_code=400, detail="No update fields provided")
+
+    from datetime import datetime
+    update_set = {"updated_at": datetime.utcnow(), "updated_by": current_user.username}
+    if update_req.acknowledged is not None:
+        update_set["acknowledged"] = update_req.acknowledged
+    if update_req.resolved is not None:
+        update_set["resolved"] = update_req.resolved
+
+    alerts_collection.update_one({"_id": alert_id}, {"$set": update_set})
+    updated = alerts_collection.find_one({"_id": alert_id}, {"_id": 0})
+    return updated
 
 
 @app.post("/api/alerts/{alert_id}/retry-notification")

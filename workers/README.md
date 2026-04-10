@@ -46,37 +46,121 @@ Use `shadow-ai-hunter_backend:phase1-final` for all Phase 1 deployments.
 
 ### What Phase 1 does NOT include (known gaps)
 
-These are out of scope for Phase 1 and must be addressed before the product is publicly sellable:
-
-- **Multi-project isolation enforcement** — `source_project`/`project_id` must be added to device records created by the scanner worker
 - **Per-customer API key self-service** — keys are configured via `INGEST_API_KEYS` env var; no UI or API for customers to create/rotate keys
 - **Usage metering / billing** — no `usage_records` collection or per-customer event metering
-- **Audit logging** — no `audit_log` collection tracking access history
-- **Customer-facing docs / onboarding** — no OpenAPI portal, no Postman collection, no install guide
 - **Alert notifications** — detections create alert records; no push to Slack, email, or webhook
-- **Real policy enforcement** — `policy_enforcer.py` is a local stdout stub; no cloud firewall integration (AWS SG, GCP Firewall, Cloudflare)
-- **AI_SERVICES map extensibility** — 13 hardcoded domains; customers cannot add custom signatures
-- **Docker Hub push** — image push is not yet configured; operators must build locally
+- **Real policy enforcement** — `policy_enforcer.py` is a local stdout stub
+- **Multi-project isolation enforcement** — device records must be tagged with project identity
+- **Docker Hub push** — image push not yet configured
+- **Customer-facing docs / onboarding** — no OpenAPI portal, no install guide
+
+---
+
+## Phase 2 Completion Summary
+
+**Phase 2 adds API key self-service, usage metering, outbound alert notifications, and operator tooling.**
+
+### What Phase 2 adds
+
+#### MongoDB-backed API key store
+- Keys stored in `api_keys` MongoDB collection (`_id`, `api_key`, `project_id`, `created_at`, `active`, `created_by`, optional `revoked_at`)
+- In-process cache with 60s TTL — new keys are valid without service restart
+- `INGEST_API_KEYS` env var still works as static fallback (backward compat)
+
+#### Operator/admin endpoints (JWT analyst+ required)
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/admin/api-keys` | Create a new API key for a project; returns plaintext key once |
+| `GET` | `/admin/api-keys` | List all API keys (masked — only `key_prefix` exposed, never full key) |
+| `DELETE` | `/admin/api-keys/{api_key}` | Soft-revoke a key (`active=false`); immediately invalidates cache |
+| `GET` | `/api/usage` | Read `usage_records` for a project with optional `from_date`/`to_date` filter |
+
+#### Alert operator endpoints (JWT analyst+ required)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/alerts/{alert_id}` | Single alert detail (includes notification status fields) |
+| `PATCH` | `/api/alerts/{alert_id}` | Mark alert acknowledged/resolved; stores `updated_at` + `updated_by` |
+| `POST` | `/api/alerts/{alert_id}/retry-notification` | Re-fire outbound webhook for a high/critical alert |
+
+#### Alert notification system
+- Outbound webhook POST to `ALERT_WEBHOOK_URL` env var (env-read at call time, no restart needed)
+- Triggered only for `high` or `critical` severity alerts
+- Compact JSON payload: `{title, severity, source_project, project_id, detection_id, created_at}`
+- 10s timeout; all failures logged and swallowed — never blocks detection pipeline
+- Delivery status persisted on every alert: `notification_attempted`, `notification_sent`, `notification_error`, `notification_last_attempt_at`
+- `GET /api/alerts` supports `?notification_status=sent|failed|attempted|unattempted` filter
+- `POST /api/alerts/{alert_id}/retry-notification` re-fires webhook and updates status
+
+#### Usage metering
+- `usage_records` collection: one doc per project per UTC day
+- Document shape: `{project_id, date_bucket, events_ingested, requests_count, created_at, updated_at}`
+- `date_bucket` is UTC midnight datetime; unique constraint on `(project_id, date_bucket)`
+- Auto-upserted on every `POST /ingest/event` (atomic `$inc`; never blocks ingest)
+- Read via `GET /api/usage?project_id=X&from_date=YYYY-MM-DD&to_date=YYYY-MM-DD`
+
+### Current image tags
+
+| Tag | State | Commit |
+|---|---|---|
+| `shadow-ai-hunter_backend:p2s12` | Phase 2 Step 12 build | `658fc89` (latest Phase 2) |
+| `shadow-ai-hunter_backend:phase1-final` | Phase 1 scoped backend | `e5b4a03` |
+
+### What Phase 2 does NOT include (known gaps)
+
+- **Docker Hub / GHCR push** — image must be built locally; no registry credentials configured
+- **Per-project webhook URLs** — single global `ALERT_WEBHOOK_URL` for all projects
+- **Alert retry queue** — no automatic retry with backoff; only manual retry via endpoint
+- **Slack/email integrations** — only generic webhook POST; no Slack/email-specific formatting
+- **Rate limiting / quotas** — no enforcement of per-project limits based on usage_records
+- **Audit logging** — no `audit_log` collection tracking who called which endpoint
+- **Customer-facing key management UI** — only operator/admin access via JWT
+- **Per-customer billing calculation** — usage_records are written but no invoice/pricing logic
+- **Real policy enforcement** — `policy_enforcer.py` is still a local stdout stub
 
 ---
 
 ## API Key Configuration
 
-`POST /ingest/event` and `GET /ingest/status/{job_id}` both require a valid `X-API-Key` header.
-
-Set `INGEST_API_KEYS` as `project-id:key` pairs, comma-separated:
+### Phase 1 style (static env var)
 
 ```bash
-# docker-compose.env or .env
-INGEST_API_KEYS=project-elephant:key-alpha,project-bison:key-beta,project-capybara:key-gamma
+INGEST_API_KEYS=project-elephant:key-alpha,project-bison:key-beta
 ```
 
-- Each key maps to **exactly one** project — cross-project access is rejected with 403
-- `POST /ingest/event`: the request `project` field must match the key's bound project
-- `GET /ingest/status/{job_id}`: returns 403 if the job's `source_project` does not match the key's bound project
-- Jobs with no `source_project` (pre-change records) are accessible with any valid key (backward compat)
+### Phase 2 style (MongoDB-backed, hot-reloadable)
 
-> **No keys configured = endpoint returns 503** — fail-closed to prevent accidental open access.
+Keys are stored in the `api_keys` MongoDB collection and validated against it at runtime.
+Static env fallback still works for keys defined in `INGEST_API_KEYS`.
+
+Operator creates a key via:
+
+```bash
+# Create a new key for a project (JWT required)
+curl -X POST "http://localhost:8001/admin/api-keys?project_id=project-fox" \
+  -H "Authorization: Bearer <analyst-jwt>"
+# Response: {"api_key": "<plaintext-key>", "project_id": "project-fox", ...}
+# Store the key — it cannot be retrieved again
+```
+
+Operator lists keys:
+
+```bash
+curl "http://localhost:8001/admin/api-keys" \
+  -H "Authorization: Bearer <analyst-jwt>"
+# Returns: {api_keys: [{key_prefix: "abc123...", project_id: "...", active: true, ...}]}
+# Note: full plaintext key is NEVER returned after creation
+```
+
+Operator revokes a key:
+
+```bash
+curl -X DELETE "http://localhost:8001/admin/api-keys/<full-api-key>" \
+  -H "Authorization: Bearer <analyst-jwt>"
+# Response: {"message": "API key revoked", "api_key": "abc123..."}
+# Revoked key immediately fails X-API-Key validation
+```
 
 ---
 
@@ -194,6 +278,12 @@ db.events.find({source_project: "project-elephant"}).sort({created_at: -1}).limi
 
 // Count pending (undetected) events — indicates detection lag
 db.events.countDocuments({detection_status: "pending"})
+
+// Show usage records for a project
+db.usage_records.find({project_id: "project-elephant"}).sort({date_bucket: 1}).pretty()
+
+// Show API keys (masked — full key is not stored)
+db.api_keys.find({}, {api_key: 0}).pretty()
 ```
 
 ---
@@ -207,6 +297,9 @@ db.events.countDocuments({detection_status: "pending"})
 | `GET` | `/api/health` | none | none |
 | `GET` | `/api/dashboard/stats` | scoped metrics | full (global) metrics |
 | `GET` | `/api/alerts` | project-scoped | full access |
+| `GET` | `/api/alerts/{alert_id}` | project-scoped | full access |
+| `PATCH` | `/api/alerts/{alert_id}` | — | JWT analyst+ only |
+| `POST` | `/api/alerts/{alert_id}/retry-notification` | — | JWT analyst+ only |
 | `GET` | `/api/devices` | project-scoped | full access |
 | `GET` | `/api/scans` | project-scoped | full access |
 | `GET` | `/api/scans/{scan_id}` | project-scoped | full access |
@@ -214,6 +307,10 @@ db.events.countDocuments({detection_status: "pending"})
 | `POST` | `/api/policies` | project-tagged | full access (untagged) |
 | `POST` | `/api/scan` | — | JWT (analyst+) |
 | `POST` | `/api/telemetry/import` | — | JWT (admin) |
+| `GET` | `/api/usage` | — | JWT analyst+ only |
+| `POST` | `/admin/api-keys` | — | JWT analyst+ only |
+| `GET` | `/admin/api-keys` | — | JWT analyst+ only |
+| `DELETE` | `/admin/api-keys/{api_key}` | — | JWT analyst+ only |
 
 ---
 

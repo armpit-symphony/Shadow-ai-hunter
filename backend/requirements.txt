@@ -9,7 +9,7 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 bcrypt==3.2.2
 python-dotenv==1.0.0
-scapy==2.5.0
+scapy==2.7.0
 python-nmap==0.7.1
 psutil==5.9.6
 requests==2.31.0
